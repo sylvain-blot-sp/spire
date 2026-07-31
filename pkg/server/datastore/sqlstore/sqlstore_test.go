@@ -2520,6 +2520,166 @@ func (s *PluginSuite) TestCreateOrReturnRegistrationEntry() {
 	}
 }
 
+// TestCreateOrReturnRegistrationEntrySimilarity exercises the entry
+// similarity rules: an entry is only considered to already exist when another
+// entry has the same parent ID, SPIFFE ID and exactly the same selector set.
+func (s *PluginSuite) TestCreateOrReturnRegistrationEntrySimilarity() {
+	newEntry := func(parentID, spiffeID string, selectors ...*common.Selector) *common.RegistrationEntry {
+		return &common.RegistrationEntry{
+			ParentId:    parentID,
+			SpiffeId:    spiffeID,
+			Selectors:   selectors,
+			X509SvidTtl: 1,
+			JwtSvidTtl:  1,
+		}
+	}
+
+	selectorA := &common.Selector{Type: "a", Value: "1"}
+	selectorB := &common.Selector{Type: "b", Value: "2"}
+	selectorC := &common.Selector{Type: "c", Value: "3"}
+
+	original, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx,
+		newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB))
+	s.Require().NoError(err)
+	s.Require().False(alreadyExists)
+
+	for _, tt := range []struct {
+		name          string
+		entry         *common.RegistrationEntry
+		expectSimilar bool
+	}{
+		{
+			name:          "exact match returns the existing entry",
+			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB),
+			expectSimilar: true,
+		},
+		{
+			name:          "exact match with the selectors in another order",
+			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorB, selectorA),
+			expectSimilar: true,
+		},
+		{
+			name:          "exact match with a duplicated selector",
+			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB, selectorA),
+			expectSimilar: true,
+		},
+		{
+			name:  "selector superset is not an exact match",
+			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB, selectorC),
+		},
+		{
+			name:  "selector subset is not an exact match",
+			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA),
+		},
+		{
+			name:  "disjoint selectors are not an exact match",
+			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorC),
+		},
+		{
+			name:  "different parent ID does not match",
+			entry: newEntry("spiffe://example.org/other-parent", "spiffe://example.org/workload", selectorA, selectorB),
+		},
+		{
+			name:  "different SPIFFE ID does not match",
+			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/other-workload", selectorA, selectorB),
+		},
+	} {
+		s.T().Run(tt.name, func(t *testing.T) {
+			createdEntry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, tt.entry)
+			require.NoError(t, err)
+			require.NotNil(t, createdEntry)
+			require.Equal(t, tt.expectSimilar, alreadyExists)
+			if tt.expectSimilar {
+				require.Equal(t, original.EntryId, createdEntry.EntryId)
+				return
+			}
+			require.NotEqual(t, original.EntryId, createdEntry.EntryId)
+
+			// The new entry must itself be found on a subsequent identical
+			// request, i.e. duplicate protection still holds for it.
+			returnedEntry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, tt.entry)
+			require.NoError(t, err)
+			require.True(t, alreadyExists)
+			require.Equal(t, createdEntry.EntryId, returnedEntry.EntryId)
+
+			s.deleteRegistrationEntry(createdEntry.EntryId)
+		})
+	}
+}
+
+// TestCreateOrReturnRegistrationEntryWithSharedSelector is a regression test
+// for the similarity lookup: the number of entries sharing a selector with the
+// entry being created must not affect the outcome (nor, in production, the
+// amount of work the database does).
+func (s *PluginSuite) TestCreateOrReturnRegistrationEntryWithSharedSelector() {
+	const numEntries = 500
+
+	sharedSelector := &common.Selector{Type: "workload", Value: "shared"}
+	newEntry := func(id int) *common.RegistrationEntry {
+		return &common.RegistrationEntry{
+			ParentId:    fmt.Sprintf("spiffe://example.org/parent%d", id),
+			SpiffeId:    fmt.Sprintf("spiffe://example.org/workload%d", id),
+			Selectors:   []*common.Selector{sharedSelector},
+			X509SvidTtl: 1,
+			JwtSvidTtl:  1,
+		}
+	}
+
+	entryIDs := make([]string, 0, numEntries)
+	for i := range numEntries {
+		entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
+		s.Require().NoError(err)
+		s.Require().False(alreadyExists)
+		entryIDs = append(entryIDs, entry.EntryId)
+	}
+
+	// Each of the entries sharing the selector must still be matched by its own
+	// parent/SPIFFE ID pair.
+	for _, i := range []int{0, numEntries / 2, numEntries - 1} {
+		entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
+		s.Require().NoError(err)
+		s.Require().True(alreadyExists)
+		s.Require().Equal(entryIDs[i], entry.EntryId)
+	}
+
+	// A new parent/SPIFFE ID pair with the same shared selector still creates.
+	entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(numEntries))
+	s.Require().NoError(err)
+	s.Require().False(alreadyExists)
+	s.Require().NotContains(entryIDs, entry.EntryId)
+}
+
+// TestRegisteredEntriesParentSpiffeIndex asserts that the composite index
+// backing the registration entry similarity lookup is part of the schema.
+func (s *PluginSuite) TestRegisteredEntriesParentSpiffeIndex() {
+	const indexName = "idx_registered_entries_parent_spiffe"
+
+	var query string
+	switch dbType := s.ds.db.databaseType; dbType {
+	case SQLite:
+		query = "SELECT sql AS definition FROM sqlite_master WHERE type = 'index' AND name = '" + indexName + "'"
+	case PostgreSQL:
+		query = "SELECT indexdef AS definition FROM pg_indexes WHERE tablename = 'registered_entries' AND indexname = '" + indexName + "'"
+	case MySQL:
+		query = "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index) AS definition FROM information_schema.statistics" +
+			" WHERE table_schema = DATABASE() AND table_name = 'registered_entries' AND index_name = '" + indexName + "'"
+	default:
+		s.Require().FailNowf("unsupported database type", "%q", dbType)
+	}
+
+	var index struct {
+		Definition string
+	}
+	s.Require().NoError(s.ds.db.Raw(query).Scan(&index).Error)
+	s.Require().NotEmpty(index.Definition, "%s index not found", indexName)
+
+	parentIdx := strings.Index(index.Definition, "parent_id")
+	spiffeIdx := strings.Index(index.Definition, "spiffe_id")
+	s.Require().NotEqual(-1, parentIdx, "index does not cover parent_id: %s", index.Definition)
+	s.Require().NotEqual(-1, spiffeIdx, "index does not cover spiffe_id: %s", index.Definition)
+	s.Require().Less(parentIdx, spiffeIdx, "index must lead with parent_id: %s", index.Definition)
+}
+
 func (s *PluginSuite) TestCreateInvalidRegistrationEntry() {
 	var invalidRegistrationEntries []*common.RegistrationEntry
 	s.getTestDataFromJSONFile(filepath.Join("testdata", "invalid_registration_entries.json"), &invalidRegistrationEntries)
@@ -5548,11 +5708,14 @@ func (s *PluginSuite) TestMigration() {
 		s.T().Run(fmt.Sprintf("migration_from_schema_version_%d", schemaVersion), func(t *testing.T) {
 			require := require.New(t)
 			dbName := fmt.Sprintf("v%d.sqlite3", schemaVersion)
-			dbPath := filepath.ToSlash(filepath.Join(s.dir, "migration-"+dbName))
-			if runtime.GOOS == "windows" {
-				dbPath = "/" + dbPath
+			newDBPath := func(prefix string) (string, string) {
+				dbPath := filepath.ToSlash(filepath.Join(s.dir, prefix+dbName))
+				if runtime.GOOS == "windows" {
+					dbPath = "/" + dbPath
+				}
+				return dbPath, fmt.Sprintf("file://%s", dbPath)
 			}
-			dbURI := fmt.Sprintf("file://%s", dbPath)
+			dbPath, dbURI := newDBPath("migration-")
 
 			minimalDB := func() string {
 				previousMinor := codeVersion
@@ -5567,7 +5730,7 @@ func (s *PluginSuite) TestMigration() {
 				`, schemaVersion, previousMinor)
 			}
 
-			prepareDB := func(migrationSupported bool) {
+			prepareDBAt := func(dbPath, dbURI string, migrationSupported bool, extraStatements string) {
 				dump := migrationDumps[schemaVersion]
 				if migrationSupported {
 					require.NotEmpty(dump, "no migration dump set up for schema version")
@@ -5575,7 +5738,7 @@ func (s *PluginSuite) TestMigration() {
 					require.Empty(dump, "migration dump exists for unsupported schema version")
 					dump = minimalDB()
 				}
-				dumpDB(t, dbPath, dump)
+				dumpDB(t, dbPath, dump+extraStatements)
 				err := s.ds.Configure(ctx, fmt.Sprintf(`
 					database_type = "sqlite3"
 					connection_string = %q
@@ -5585,6 +5748,17 @@ func (s *PluginSuite) TestMigration() {
 				} else {
 					require.EqualError(err, fmt.Sprintf("datastore-sql: migrating from schema version %d requires a previous SPIRE release; please follow the upgrade strategy at doc/upgrading.md", schemaVersion))
 				}
+			}
+			prepareDB := func(migrationSupported bool) {
+				prepareDBAt(dbPath, dbURI, migrationSupported, "")
+			}
+			requireParentSpiffeIndex := func() {
+				var index struct {
+					Definition string
+				}
+				require.NoError(s.ds.db.Raw(`SELECT sql AS definition FROM sqlite_master WHERE type = 'index' AND name = 'idx_registered_entries_parent_spiffe'`).Scan(&index).Error)
+				require.Contains(index.Definition, "parent_id")
+				require.Contains(index.Definition, "spiffe_id")
 			}
 			switch schemaVersion {
 			// All of these schema versions were migrated by previous versions
@@ -5597,6 +5771,17 @@ func (s *PluginSuite) TestMigration() {
 			case 24:
 				// Migration from v24 to v25 adds additional_attributes column
 				prepareDB(true)
+			case 25:
+				// Migration from v25 to v26 adds the composite
+				// registered_entries(parent_id, spiffe_id) index
+				prepareDB(true)
+				requireParentSpiffeIndex()
+
+				// Installations that created the index by hand before it was
+				// part of the schema must migrate without error
+				manualPath, manualURI := newDBPath("migration-manual-index-")
+				prepareDBAt(manualPath, manualURI, true, manualParentSpiffeIndex)
+				requireParentSpiffeIndex()
 			default:
 				t.Fatalf("no migration test added for schema version %d", schemaVersion)
 			}
@@ -6137,4 +6322,108 @@ func assertCAJournal(t *testing.T, exp, actual *datastore.CAJournal) {
 	}
 	assert.Equal(t, exp.ActiveX509AuthorityID, actual.ActiveX509AuthorityID)
 	assert.Equal(t, exp.Data, actual.Data)
+}
+
+// TestListSimilarEntriesQuery asserts that looking for a similar registration
+// entry filters on the (parent_id, spiffe_id) index only. Filtering by selector
+// in SQL requires intersecting with every entry that shares the selector, which
+// dominates the query cost when a selector is common to many entries.
+func TestListSimilarEntriesQuery(t *testing.T) {
+	req := listSimilarEntriesRequest(&common.RegistrationEntry{
+		ParentId: "spiffe://example.org/parent",
+		SpiffeId: "spiffe://example.org/workload",
+		Selectors: []*common.Selector{
+			{Type: "a", Value: "1"},
+			{Type: "b", Value: "2"},
+		},
+	})
+
+	for _, tt := range []struct {
+		name        string
+		dbType      string
+		supportsCTE bool
+		// PostgreSQL rewrites the "?" placeholders to positional parameters.
+		candidateQuery string
+	}{
+		{name: "sqlite3", dbType: SQLite, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
+		{name: "postgres", dbType: PostgreSQL, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = $1 AND spiffe_id = $2"},
+		{name: "mysql", dbType: MySQL, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
+		{name: "mysql with CTE", dbType: MySQL, supportsCTE: true, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			query, args, err := buildListRegistrationEntriesQuery(tt.dbType, tt.supportsCTE, req)
+			require.NoError(t, err)
+
+			require.Contains(t, query, tt.candidateQuery)
+			require.Equal(t, []any{"spiffe://example.org/parent", "spiffe://example.org/workload"}, args)
+
+			// The candidate query must not be intersected with the selectors
+			// table.
+			require.NotContains(t, query, "SELECT registered_entry_id AS e_id FROM selectors")
+			require.NotContains(t, query, "INTERSECT")
+		})
+	}
+}
+
+// newPluginForTB builds a fresh sqlite3-backed *Plugin outside of PluginSuite,
+// for tests and benchmarks that are not suite methods.
+func newPluginForTB(tb testing.TB) *Plugin {
+	log, _ := test.NewNullLogger()
+	ds := New(log)
+	tb.Cleanup(func() {
+		ds.Close()
+	})
+
+	dbPath := filepath.ToSlash(filepath.Join(tb.TempDir(), "db.sqlite3"))
+	err := ds.Configure(ctx, fmt.Sprintf(`
+		database_type = "sqlite3"
+		log_sql = true
+		connection_string = "%s"
+	`, dbPath))
+	require.NoError(tb, err)
+
+	return ds
+}
+
+// BenchmarkCreateOrReturnRegistrationEntrySharedSelector measures the entry
+// similarity lookup against a datastore where every entry carries the same
+// selector. The cost must track the number of entries sharing the parent and
+// SPIFFE ID, not the number of entries sharing the selector.
+func BenchmarkCreateOrReturnRegistrationEntrySharedSelector(b *testing.B) {
+	const numEntries = 5000
+
+	ds := newPluginForTB(b)
+
+	sharedSelector := &common.Selector{Type: "workload", Value: "shared"}
+	newEntry := func(id int) *common.RegistrationEntry {
+		return &common.RegistrationEntry{
+			ParentId:    fmt.Sprintf("spiffe://example.org/parent%d", id),
+			SpiffeId:    fmt.Sprintf("spiffe://example.org/workload%d", id),
+			Selectors:   []*common.Selector{sharedSelector},
+			X509SvidTtl: 1,
+			JwtSvidTtl:  1,
+		}
+	}
+
+	for i := range numEntries {
+		_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
+		require.NoError(b, err)
+		require.False(b, alreadyExists)
+	}
+
+	b.Run("existing entry", func(b *testing.B) {
+		for i := 0; b.Loop(); i++ {
+			_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i%numEntries))
+			require.NoError(b, err)
+			require.True(b, alreadyExists)
+		}
+	})
+
+	b.Run("new entry", func(b *testing.B) {
+		for i := numEntries; b.Loop(); i++ {
+			_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
+			require.NoError(b, err)
+			require.False(b, alreadyExists)
+		}
+	})
 }

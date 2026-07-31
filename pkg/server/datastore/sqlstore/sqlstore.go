@@ -4969,27 +4969,49 @@ func nullableUnixTimeToDBTime(unixTime int64) *time.Time {
 	return &dbTime
 }
 
-func lookupSimilarEntry(ctx context.Context, db *sqlDB, tx *gorm.DB, entry *common.RegistrationEntry) (*common.RegistrationEntry, error) {
-	resp, err := listRegistrationEntriesOnce(ctx, tx.CommonDB().(queryContext), db.databaseType, db.supportsCTE, &datastore.ListRegistrationEntriesRequest{
+// listSimilarEntriesRequest builds the candidate query used to look for an
+// entry similar to the given one. Only the parent and SPIFFE ID are pushed
+// down to the database: those columns are backed by a selective composite
+// index, whereas filtering by selector in SQL requires intersecting with every
+// entry sharing the selector, which is unbounded for workload selectors that
+// are common to many entries.
+func listSimilarEntriesRequest(entry *common.RegistrationEntry) *datastore.ListRegistrationEntriesRequest {
+	return &datastore.ListRegistrationEntriesRequest{
 		BySpiffeID: entry.SpiffeId,
 		ByParentID: entry.ParentId,
-		BySelectors: &datastore.BySelectors{
-			Match:     datastore.Exact,
-			Selectors: entry.Selectors,
-		},
-	})
+	}
+}
+
+func lookupSimilarEntry(ctx context.Context, db *sqlDB, tx *gorm.DB, entry *common.RegistrationEntry) (*common.RegistrationEntry, error) {
+	resp, err := listRegistrationEntriesOnce(ctx, tx.CommonDB().(queryContext), db.databaseType, db.supportsCTE, listSimilarEntriesRequest(entry))
 	if err != nil {
 		return nil, err
 	}
 
-	// listRegistrationEntriesOnce returns both exact and superset matches.
-	// Filter out the superset matches to get an exact match
-	entries := filterEntriesBySelectorSet(resp.Entries, entry.Selectors)
-	if len(entries) > 0 {
-		return entries[0], nil
+	// The candidates share the parent and SPIFFE ID with the entry but may
+	// have any selector set. filterEntriesBySelectorSet keeps the candidates
+	// whose selectors are a subset of the entry selectors; requiring the same
+	// number of distinct selectors on top of that yields the exact matches.
+	want := distinctSelectorCount(entry.Selectors)
+	for _, candidate := range filterEntriesBySelectorSet(resp.Entries, entry.Selectors) {
+		if distinctSelectorCount(candidate.Selectors) == want {
+			return candidate, nil
+		}
 	}
 
 	return nil, nil
+}
+
+func distinctSelectorCount(selectors []*common.Selector) int {
+	type selectorKey struct {
+		Type  string
+		Value string
+	}
+	set := make(map[selectorKey]struct{}, len(selectors))
+	for _, s := range selectors {
+		set[selectorKey{Type: s.Type, Value: s.Value}] = struct{}{}
+	}
+	return len(set)
 }
 
 func rowsToCommonRegistrationEntries(rows *sql.Rows, entries []*common.RegistrationEntry) ([]*common.RegistrationEntry, uint64, error) {

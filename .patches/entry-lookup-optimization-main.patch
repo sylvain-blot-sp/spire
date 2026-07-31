@@ -1,0 +1,563 @@
+diff --git a/pkg/server/datastore/sqlstore/migration.go b/pkg/server/datastore/sqlstore/migration.go
+index 459f0a69e..610cff966 100644
+--- a/pkg/server/datastore/sqlstore/migration.go
++++ b/pkg/server/datastore/sqlstore/migration.go
+@@ -282,11 +282,13 @@ import (
+ // | v1.15.0 |        |                                                                           |
+ // | v1.15.1 |        |                                                                           |
+ // | v1.15.2 |        |                                                                           |
++// |---------|--------|---------------------------------------------------------------------------|
++// | v1.15.3 | 26     | Added registered_entries(parent_id, spiffe_id) index                      |
+ // ================================================================================================
+ 
+ const (
+ 	// the latest schema version of the database in the code
+-	latestSchemaVersion = 25
++	latestSchemaVersion = 26
+ 
+ 	// lastMinorReleaseSchemaVersion is the schema version supported by the
+ 	// last minor release. When the migrations are opportunistically pruned
+@@ -521,6 +523,8 @@ func migrateVersion(tx *gorm.DB, currVersion int, log logrus.FieldLogger) (versi
+ 		err = migrateToV24(tx)
+ 	case 24:
+ 		err = migrateToV25(tx)
++	case 25:
++		err = migrateToV26(tx)
+ 	default:
+ 		err = sqlcommon.NewSQLError("no migration support for unknown schema version %d", currVersion)
+ 	}
+@@ -547,6 +551,17 @@ func migrateToV25(tx *gorm.DB) error {
+ 	return nil
+ }
+ 
++func migrateToV26(tx *gorm.DB) error {
++	// Add the idx_registered_entries_parent_spiffe index on
++	// registered_entries(parent_id, spiffe_id). AutoMigrate skips indexes that
++	// already exist, so deployments that created this index by hand migrate
++	// without doing any work.
++	if err := tx.AutoMigrate(&RegisteredEntry{}).Error; err != nil {
++		return sqlcommon.NewWrappedSQLError(err)
++	}
++	return nil
++}
++
+ func addFederatedRegistrationEntriesRegisteredEntryIDIndex(tx *gorm.DB) error {
+ 	// GORM creates the federated_registration_entries implicitly with a primary
+ 	// key tuple (bundle_id, registered_entry_id). Unfortunately, MySQL5 does
+diff --git a/pkg/server/datastore/sqlstore/migration_test.go b/pkg/server/datastore/sqlstore/migration_test.go
+index 0b3d2a713..5ef005037 100644
+--- a/pkg/server/datastore/sqlstore/migration_test.go
++++ b/pkg/server/datastore/sqlstore/migration_test.go
+@@ -98,7 +98,52 @@ var (
+             CREATE INDEX idx_federated_registration_entries_registered_entry_id ON "federated_registration_entries"(registered_entry_id) ;
+             COMMIT;
+ 		    `,
++		25: `
++            PRAGMA foreign_keys=OFF;
++            BEGIN TRANSACTION;
++            CREATE TABLE IF NOT EXISTS "federated_registration_entries" ("bundle_id" integer,"registered_entry_id" integer, PRIMARY KEY ("bundle_id","registered_entry_id"));
++            CREATE TABLE IF NOT EXISTS "bundles" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"trust_domain" varchar(255) NOT NULL,"data" blob );
++            CREATE TABLE IF NOT EXISTS "attested_node_entries" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"spiffe_id" varchar(255),"data_type" varchar(255),"serial_number" varchar(255),"expires_at" datetime,"new_serial_number" varchar(255),"new_expires_at" datetime,"can_reattest" bool,"agent_version" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "attested_node_entries_events" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"spiffe_id" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "node_resolver_map_entries" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"spiffe_id" varchar(255),"type" varchar(255),"value" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "registered_entries" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"entry_id" varchar(255),"spiffe_id" varchar(255),"parent_id" varchar(255),"ttl" integer,"admin" bool,"downstream" bool,"expiry" bigint,"revision_number" bigint,"store_svid" bool,"hint" varchar(255),"jwt_svid_ttl" integer,"additional_attributes" blob );
++            CREATE TABLE IF NOT EXISTS "registered_entries_events" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"entry_id" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "join_tokens" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"token" varchar(255),"expiry" bigint );
++            CREATE TABLE IF NOT EXISTS "selectors" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"registered_entry_id" integer,"type" varchar(255),"value" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "migrations" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"version" integer,"code_version" varchar(255) );
++            INSERT INTO migrations VALUES(1,'2026-07-30 16:37:29.457426+02:00','2026-07-30 16:37:29.457426+02:00',25,'1.15.2');
++            CREATE TABLE IF NOT EXISTS "dns_names" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"registered_entry_id" integer,"value" varchar(255) );
++            CREATE TABLE IF NOT EXISTS "federated_trust_domains" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"trust_domain" varchar(255) NOT NULL,"bundle_endpoint_url" varchar(255),"bundle_endpoint_profile" varchar(255),"endpoint_spiffe_id" varchar(255),"implicit" bool );
++            CREATE TABLE IF NOT EXISTS "ca_journals" ("id" integer primary key autoincrement,"created_at" datetime,"updated_at" datetime,"data" blob,"active_x509_authority_id" varchar(255),"active_jwt_authority_id" varchar(255) );
++            INSERT INTO sqlite_sequence VALUES('migrations',1);
++            CREATE UNIQUE INDEX uix_bundles_trust_domain ON "bundles"(trust_domain) ;
++            CREATE INDEX idx_attested_node_entries_expires_at ON "attested_node_entries"(expires_at) ;
++            CREATE UNIQUE INDEX uix_attested_node_entries_spiffe_id ON "attested_node_entries"(spiffe_id) ;
++            CREATE UNIQUE INDEX idx_node_resolver_map ON "node_resolver_map_entries"(spiffe_id, "type", "value") ;
++            CREATE INDEX idx_registered_entries_spiffe_id ON "registered_entries"(spiffe_id) ;
++            CREATE INDEX idx_registered_entries_parent_id ON "registered_entries"(parent_id) ;
++            CREATE INDEX idx_registered_entries_expiry ON "registered_entries"("expiry") ;
++            CREATE INDEX idx_registered_entries_hint ON "registered_entries"("hint") ;
++            CREATE UNIQUE INDEX uix_registered_entries_entry_id ON "registered_entries"(entry_id) ;
++            CREATE UNIQUE INDEX uix_join_tokens_token ON "join_tokens"("token") ;
++            CREATE INDEX idx_selectors_type_value ON "selectors"("type", "value") ;
++            CREATE UNIQUE INDEX idx_selector_entry ON "selectors"(registered_entry_id, "type", "value") ;
++            CREATE UNIQUE INDEX idx_dns_entry ON "dns_names"(registered_entry_id, "value") ;
++            CREATE UNIQUE INDEX uix_federated_trust_domains_trust_domain ON "federated_trust_domains"(trust_domain) ;
++            CREATE INDEX idx_ca_journals_active_x509_authority_id ON "ca_journals"(active_x509_authority_id) ;
++            CREATE INDEX idx_ca_journals_active_jwt_authority_id ON "ca_journals"(active_jwt_authority_id) ;
++            CREATE INDEX idx_federated_registration_entries_registered_entry_id ON "federated_registration_entries"(registered_entry_id) ;
++            COMMIT;
++            `,
+ 	}
++
++	// manualParentSpiffeIndex is the statement an operator would have run to
++	// create the composite index by hand before it was part of the schema. It
++	// is appended to the schema version 25 dump to make sure the migration is
++	// idempotent for those installations.
++	manualParentSpiffeIndex = `
++            CREATE INDEX idx_registered_entries_parent_spiffe ON "registered_entries"(parent_id, spiffe_id) ;
++            `
+ )
+ 
+ func dumpDB(t *testing.T, path string, statements string) {
+diff --git a/pkg/server/datastore/sqlstore/models.go b/pkg/server/datastore/sqlstore/models.go
+index cb38637be..75cf3935e 100644
+--- a/pkg/server/datastore/sqlstore/models.go
++++ b/pkg/server/datastore/sqlstore/models.go
+@@ -73,9 +73,12 @@ func (NodeSelector) TableName() string {
+ type RegisteredEntry struct {
+ 	Model
+ 
+-	EntryID  string `gorm:"unique_index"`
+-	SpiffeID string `gorm:"index"`
+-	ParentID string `gorm:"index"`
++	EntryID string `gorm:"unique_index"`
++	// ParentID is declared before SpiffeID so that the composite index columns
++	// are ordered (parent_id, spiffe_id), which is the order the registration
++	// entry lookups filter on.
++	ParentID string `gorm:"index:idx_registered_entries_parent_id,idx_registered_entries_parent_spiffe"`
++	SpiffeID string `gorm:"index:idx_registered_entries_spiffe_id,idx_registered_entries_parent_spiffe"`
+ 	// TTL of identities derived from this entry. This field represents the X509-SVID TTL of the Entry
+ 	TTL           int32
+ 	Selectors     []Selector
+diff --git a/pkg/server/datastore/sqlstore/sqlstore.go b/pkg/server/datastore/sqlstore/sqlstore.go
+index 4a249e16e..2eff1c4b2 100644
+--- a/pkg/server/datastore/sqlstore/sqlstore.go
++++ b/pkg/server/datastore/sqlstore/sqlstore.go
+@@ -4962,29 +4962,51 @@ func nullableUnixTimeToDBTime(unixTime int64) *time.Time {
+ 	return &dbTime
+ }
+ 
+-func lookupSimilarEntry(ctx context.Context, db *sqlDB, tx *gorm.DB, entry *common.RegistrationEntry) (*common.RegistrationEntry, error) {
+-	resp, err := listRegistrationEntriesOnce(ctx, tx.CommonDB().(queryContext), db.databaseType, db.supportsCTE, &datastore.ListRegistrationEntriesRequest{
++// listSimilarEntriesRequest builds the candidate query used to look for an
++// entry similar to the given one. Only the parent and SPIFFE ID are pushed
++// down to the database: those columns are backed by a selective composite
++// index, whereas filtering by selector in SQL requires intersecting with every
++// entry sharing the selector, which is unbounded for workload selectors that
++// are common to many entries.
++func listSimilarEntriesRequest(entry *common.RegistrationEntry) *datastore.ListRegistrationEntriesRequest {
++	return &datastore.ListRegistrationEntriesRequest{
+ 		BySpiffeID: entry.SpiffeId,
+ 		ByParentID: entry.ParentId,
+-		BySelectors: &datastore.BySelectors{
+-			Match:     datastore.Exact,
+-			Selectors: entry.Selectors,
+-		},
+-	})
++	}
++}
++
++func lookupSimilarEntry(ctx context.Context, db *sqlDB, tx *gorm.DB, entry *common.RegistrationEntry) (*common.RegistrationEntry, error) {
++	resp, err := listRegistrationEntriesOnce(ctx, tx.CommonDB().(queryContext), db.databaseType, db.supportsCTE, listSimilarEntriesRequest(entry))
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
+-	// listRegistrationEntriesOnce returns both exact and superset matches.
+-	// Filter out the superset matches to get an exact match
+-	entries := filterEntriesBySelectorSet(resp.Entries, entry.Selectors)
+-	if len(entries) > 0 {
+-		return entries[0], nil
++	// The candidates share the parent and SPIFFE ID with the entry but may
++	// have any selector set. filterEntriesBySelectorSet keeps the candidates
++	// whose selectors are a subset of the entry selectors; requiring the same
++	// number of distinct selectors on top of that yields the exact matches.
++	want := distinctSelectorCount(entry.Selectors)
++	for _, candidate := range filterEntriesBySelectorSet(resp.Entries, entry.Selectors) {
++		if distinctSelectorCount(candidate.Selectors) == want {
++			return candidate, nil
++		}
+ 	}
+ 
+ 	return nil, nil
+ }
+ 
++func distinctSelectorCount(selectors []*common.Selector) int {
++	type selectorKey struct {
++		Type  string
++		Value string
++	}
++	set := make(map[selectorKey]struct{}, len(selectors))
++	for _, s := range selectors {
++		set[selectorKey{Type: s.Type, Value: s.Value}] = struct{}{}
++	}
++	return len(set)
++}
++
+ func rowsToCommonRegistrationEntries(rows *sql.Rows, entries []*common.RegistrationEntry) ([]*common.RegistrationEntry, uint64, error) {
+ 	pushEntry := func(entry *common.RegistrationEntry) {
+ 		// Due to previous bugs (i.e. #1191), there can be cruft rows related
+diff --git a/pkg/server/datastore/sqlstore/sqlstore_test.go b/pkg/server/datastore/sqlstore/sqlstore_test.go
+index f1b44fc04..2e962942e 100644
+--- a/pkg/server/datastore/sqlstore/sqlstore_test.go
++++ b/pkg/server/datastore/sqlstore/sqlstore_test.go
+@@ -13,6 +13,7 @@ import (
+ 	"github.com/sirupsen/logrus"
+ 	"github.com/sirupsen/logrus/hooks/test"
+ 	"github.com/spiffe/spire/pkg/server/datastore/sqltest"
++	"github.com/spiffe/spire/proto/spire/common"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -46,24 +47,65 @@ func TestPlugin(t *testing.T) {
+ // that need direct access to unexported sqlstore internals (gorm models,
+ // migration state, raw query builders) and therefore cannot run through the
+ // sqltest.DataStoreUnderTest interface.
+-func newTestPlugin(t *testing.T) *Plugin {
++func newTestPlugin(tb testing.TB) *Plugin {
+ 	log, _ := test.NewNullLogger()
+ 	ds := New(log)
+-	t.Cleanup(func() {
++	tb.Cleanup(func() {
+ 		ds.Close()
+ 	})
+ 
+-	dbPath := filepath.ToSlash(filepath.Join(t.TempDir(), "db.sqlite3"))
++	dbPath := filepath.ToSlash(filepath.Join(tb.TempDir(), "db.sqlite3"))
+ 	err := ds.Configure(ctx, fmt.Sprintf(`
+ 		database_type = "sqlite3"
+ 		log_sql = true
+ 		connection_string = "%s"
+ 	`, dbPath))
+-	require.NoError(t, err)
++	require.NoError(tb, err)
+ 
+ 	return ds
+ }
+ 
++// TestListSimilarEntriesQuery asserts that looking for a similar registration
++// entry filters on the (parent_id, spiffe_id) index only. Filtering by selector
++// in SQL requires intersecting with every entry that shares the selector, which
++// dominates the query cost when a selector is common to many entries.
++func TestListSimilarEntriesQuery(t *testing.T) {
++	req := listSimilarEntriesRequest(&common.RegistrationEntry{
++		ParentId: "spiffe://example.org/parent",
++		SpiffeId: "spiffe://example.org/workload",
++		Selectors: []*common.Selector{
++			{Type: "a", Value: "1"},
++			{Type: "b", Value: "2"},
++		},
++	})
++
++	for _, tt := range []struct {
++		name        string
++		dbType      string
++		supportsCTE bool
++		// PostgreSQL rewrites the "?" placeholders to positional parameters.
++		candidateQuery string
++	}{
++		{name: "sqlite3", dbType: SQLite, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
++		{name: "postgres", dbType: PostgreSQL, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = $1 AND spiffe_id = $2"},
++		{name: "mysql", dbType: MySQL, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
++		{name: "mysql with CTE", dbType: MySQL, supportsCTE: true, candidateQuery: "SELECT id AS e_id FROM registered_entries WHERE parent_id = ? AND spiffe_id = ?"},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			query, args, err := buildListRegistrationEntriesQuery(tt.dbType, tt.supportsCTE, req)
++			require.NoError(t, err)
++
++			require.Contains(t, query, tt.candidateQuery)
++			require.Equal(t, []any{"spiffe://example.org/parent", "spiffe://example.org/workload"}, args)
++
++			// The candidate query must not be intersected with the selectors
++			// table.
++			require.NotContains(t, query, "SELECT registered_entry_id AS e_id FROM selectors")
++			require.NotContains(t, query, "INTERSECT")
++		})
++	}
++}
++
+ func TestBindVar(t *testing.T) {
+ 	fn := func(n int) string {
+ 		return fmt.Sprintf("$%d", n)
+@@ -217,11 +259,14 @@ func TestMigration(t *testing.T) {
+ 		t.Run(fmt.Sprintf("migration_from_schema_version_%d", schemaVersion), func(t *testing.T) {
+ 			require := require.New(t)
+ 			dbName := fmt.Sprintf("v%d.sqlite3", schemaVersion)
+-			dbPath := filepath.ToSlash(filepath.Join(dir, "migration-"+dbName))
+-			if runtime.GOOS == "windows" {
+-				dbPath = "/" + dbPath
++			newDBPath := func(prefix string) (string, string) {
++				dbPath := filepath.ToSlash(filepath.Join(dir, prefix+dbName))
++				if runtime.GOOS == "windows" {
++					dbPath = "/" + dbPath
++				}
++				return dbPath, fmt.Sprintf("file://%s", dbPath)
+ 			}
+-			dbURI := fmt.Sprintf("file://%s", dbPath)
++			dbPath, dbURI := newDBPath("migration-")
+ 
+ 			minimalDB := func() string {
+ 				previousMinor := codeVersion
+@@ -236,7 +281,7 @@ func TestMigration(t *testing.T) {
+ 				`, schemaVersion, previousMinor)
+ 			}
+ 
+-			prepareDB := func(migrationSupported bool) {
++			prepareDBAt := func(dbPath, dbURI string, migrationSupported bool, extraStatements string) {
+ 				dump := migrationDumps[schemaVersion]
+ 				if migrationSupported {
+ 					require.NotEmpty(dump, "no migration dump set up for schema version")
+@@ -244,7 +289,7 @@ func TestMigration(t *testing.T) {
+ 					require.Empty(dump, "migration dump exists for unsupported schema version")
+ 					dump = minimalDB()
+ 				}
+-				dumpDB(t, dbPath, dump)
++				dumpDB(t, dbPath, dump+extraStatements)
+ 				err := ds.Configure(ctx, fmt.Sprintf(`
+ 					database_type = "sqlite3"
+ 					connection_string = %q
+@@ -255,6 +300,17 @@ func TestMigration(t *testing.T) {
+ 					require.EqualError(err, fmt.Sprintf("datastore-sql: migrating from schema version %d requires a previous SPIRE release; please follow the upgrade strategy at doc/upgrading.md", schemaVersion))
+ 				}
+ 			}
++			prepareDB := func(migrationSupported bool) {
++				prepareDBAt(dbPath, dbURI, migrationSupported, "")
++			}
++			requireParentSpiffeIndex := func() {
++				var index struct {
++					Definition string
++				}
++				require.NoError(ds.RawScan(&index, `SELECT sql AS definition FROM sqlite_master WHERE type = 'index' AND name = 'idx_registered_entries_parent_spiffe'`))
++				require.Contains(index.Definition, "parent_id")
++				require.Contains(index.Definition, "spiffe_id")
++			}
+ 			switch schemaVersion {
+ 			// All of these schema versions were migrated by previous versions
+ 			// of SPIRE server and no longer have migration code.
+@@ -266,9 +322,63 @@ func TestMigration(t *testing.T) {
+ 			case 24:
+ 				// Migration from v24 to v25 adds additional_attributes column
+ 				prepareDB(true)
++			case 25:
++				// Migration from v25 to v26 adds the composite
++				// registered_entries(parent_id, spiffe_id) index
++				prepareDB(true)
++				requireParentSpiffeIndex()
++
++				// Installations that created the index by hand before it was
++				// part of the schema must migrate without error
++				manualPath, manualURI := newDBPath("migration-manual-index-")
++				prepareDBAt(manualPath, manualURI, true, manualParentSpiffeIndex)
++				requireParentSpiffeIndex()
+ 			default:
+ 				t.Fatalf("no migration test added for schema version %d", schemaVersion)
+ 			}
+ 		})
+ 	}
+ }
++
++// BenchmarkCreateOrReturnRegistrationEntrySharedSelector measures the entry
++// similarity lookup against a datastore where every entry carries the same
++// selector. The cost must track the number of entries sharing the parent and
++// SPIFFE ID, not the number of entries sharing the selector.
++func BenchmarkCreateOrReturnRegistrationEntrySharedSelector(b *testing.B) {
++	const numEntries = 5000
++
++	ds := newTestPlugin(b)
++
++	sharedSelector := &common.Selector{Type: "workload", Value: "shared"}
++	newEntry := func(id int) *common.RegistrationEntry {
++		return &common.RegistrationEntry{
++			ParentId:    fmt.Sprintf("spiffe://example.org/parent%d", id),
++			SpiffeId:    fmt.Sprintf("spiffe://example.org/workload%d", id),
++			Selectors:   []*common.Selector{sharedSelector},
++			X509SvidTtl: 1,
++			JwtSvidTtl:  1,
++		}
++	}
++
++	for i := range numEntries {
++		_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
++		require.NoError(b, err)
++		require.False(b, alreadyExists)
++	}
++
++	b.Run("existing entry", func(b *testing.B) {
++		for i := 0; b.Loop(); i++ {
++			_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i%numEntries))
++			require.NoError(b, err)
++			require.True(b, alreadyExists)
++		}
++	})
++
++	b.Run("new entry", func(b *testing.B) {
++		for i := numEntries; b.Loop(); i++ {
++			_, alreadyExists, err := ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
++			require.NoError(b, err)
++			require.False(b, alreadyExists)
++		}
++	})
++}
+diff --git a/pkg/server/datastore/sqltest/datastore_suite.go b/pkg/server/datastore/sqltest/datastore_suite.go
+index 9b11bb78d..cf50e5027 100644
+--- a/pkg/server/datastore/sqltest/datastore_suite.go
++++ b/pkg/server/datastore/sqltest/datastore_suite.go
+@@ -2512,6 +2512,166 @@ func (s *Suite) TestCreateOrReturnRegistrationEntry() {
+ 	}
+ }
+ 
++// TestCreateOrReturnRegistrationEntrySimilarity exercises the entry
++// similarity rules: an entry is only considered to already exist when another
++// entry has the same parent ID, SPIFFE ID and exactly the same selector set.
++func (s *Suite) TestCreateOrReturnRegistrationEntrySimilarity() {
++	newEntry := func(parentID, spiffeID string, selectors ...*common.Selector) *common.RegistrationEntry {
++		return &common.RegistrationEntry{
++			ParentId:    parentID,
++			SpiffeId:    spiffeID,
++			Selectors:   selectors,
++			X509SvidTtl: 1,
++			JwtSvidTtl:  1,
++		}
++	}
++
++	selectorA := &common.Selector{Type: "a", Value: "1"}
++	selectorB := &common.Selector{Type: "b", Value: "2"}
++	selectorC := &common.Selector{Type: "c", Value: "3"}
++
++	original, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx,
++		newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB))
++	s.Require().NoError(err)
++	s.Require().False(alreadyExists)
++
++	for _, tt := range []struct {
++		name          string
++		entry         *common.RegistrationEntry
++		expectSimilar bool
++	}{
++		{
++			name:          "exact match returns the existing entry",
++			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB),
++			expectSimilar: true,
++		},
++		{
++			name:          "exact match with the selectors in another order",
++			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorB, selectorA),
++			expectSimilar: true,
++		},
++		{
++			name:          "exact match with a duplicated selector",
++			entry:         newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB, selectorA),
++			expectSimilar: true,
++		},
++		{
++			name:  "selector superset is not an exact match",
++			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA, selectorB, selectorC),
++		},
++		{
++			name:  "selector subset is not an exact match",
++			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorA),
++		},
++		{
++			name:  "disjoint selectors are not an exact match",
++			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/workload", selectorC),
++		},
++		{
++			name:  "different parent ID does not match",
++			entry: newEntry("spiffe://example.org/other-parent", "spiffe://example.org/workload", selectorA, selectorB),
++		},
++		{
++			name:  "different SPIFFE ID does not match",
++			entry: newEntry("spiffe://example.org/parent", "spiffe://example.org/other-workload", selectorA, selectorB),
++		},
++	} {
++		s.T().Run(tt.name, func(t *testing.T) {
++			createdEntry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, tt.entry)
++			require.NoError(t, err)
++			require.NotNil(t, createdEntry)
++			require.Equal(t, tt.expectSimilar, alreadyExists)
++			if tt.expectSimilar {
++				require.Equal(t, original.EntryId, createdEntry.EntryId)
++				return
++			}
++			require.NotEqual(t, original.EntryId, createdEntry.EntryId)
++
++			// The new entry must itself be found on a subsequent identical
++			// request, i.e. duplicate protection still holds for it.
++			returnedEntry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, tt.entry)
++			require.NoError(t, err)
++			require.True(t, alreadyExists)
++			require.Equal(t, createdEntry.EntryId, returnedEntry.EntryId)
++
++			s.deleteRegistrationEntry(createdEntry.EntryId)
++		})
++	}
++}
++
++// TestCreateOrReturnRegistrationEntryWithSharedSelector is a regression test
++// for the similarity lookup: the number of entries sharing a selector with the
++// entry being created must not affect the outcome (nor, in production, the
++// amount of work the database does).
++func (s *Suite) TestCreateOrReturnRegistrationEntryWithSharedSelector() {
++	const numEntries = 500
++
++	sharedSelector := &common.Selector{Type: "workload", Value: "shared"}
++	newEntry := func(id int) *common.RegistrationEntry {
++		return &common.RegistrationEntry{
++			ParentId:    fmt.Sprintf("spiffe://example.org/parent%d", id),
++			SpiffeId:    fmt.Sprintf("spiffe://example.org/workload%d", id),
++			Selectors:   []*common.Selector{sharedSelector},
++			X509SvidTtl: 1,
++			JwtSvidTtl:  1,
++		}
++	}
++
++	entryIDs := make([]string, 0, numEntries)
++	for i := range numEntries {
++		entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
++		s.Require().NoError(err)
++		s.Require().False(alreadyExists)
++		entryIDs = append(entryIDs, entry.EntryId)
++	}
++
++	// Each of the entries sharing the selector must still be matched by its own
++	// parent/SPIFFE ID pair.
++	for _, i := range []int{0, numEntries / 2, numEntries - 1} {
++		entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(i))
++		s.Require().NoError(err)
++		s.Require().True(alreadyExists)
++		s.Require().Equal(entryIDs[i], entry.EntryId)
++	}
++
++	// A new parent/SPIFFE ID pair with the same shared selector still creates.
++	entry, alreadyExists, err := s.ds.CreateOrReturnRegistrationEntry(ctx, newEntry(numEntries))
++	s.Require().NoError(err)
++	s.Require().False(alreadyExists)
++	s.Require().NotContains(entryIDs, entry.EntryId)
++}
++
++// TestRegisteredEntriesParentSpiffeIndex asserts that the composite index
++// backing the registration entry similarity lookup is part of the schema.
++func (s *Suite) TestRegisteredEntriesParentSpiffeIndex() {
++	const indexName = "idx_registered_entries_parent_spiffe"
++
++	var query string
++	switch dbType := s.ds.DatabaseType(); dbType {
++	case "sqlite3":
++		query = "SELECT sql AS definition FROM sqlite_master WHERE type = 'index' AND name = '" + indexName + "'"
++	case "postgres":
++		query = "SELECT indexdef AS definition FROM pg_indexes WHERE tablename = 'registered_entries' AND indexname = '" + indexName + "'"
++	case "mysql":
++		query = "SELECT GROUP_CONCAT(column_name ORDER BY seq_in_index) AS definition FROM information_schema.statistics" +
++			" WHERE table_schema = DATABASE() AND table_name = 'registered_entries' AND index_name = '" + indexName + "'"
++	default:
++		s.Require().FailNowf("unsupported database type", "%q", dbType)
++	}
++
++	var index struct {
++		Definition string
++	}
++	s.Require().NoError(s.ds.RawScan(&index, query))
++	s.Require().NotEmpty(index.Definition, "%s index not found", indexName)
++
++	parentIdx := strings.Index(index.Definition, "parent_id")
++	spiffeIdx := strings.Index(index.Definition, "spiffe_id")
++	s.Require().NotEqual(-1, parentIdx, "index does not cover parent_id: %s", index.Definition)
++	s.Require().NotEqual(-1, spiffeIdx, "index does not cover spiffe_id: %s", index.Definition)
++	s.Require().Less(parentIdx, spiffeIdx, "index must lead with parent_id: %s", index.Definition)
++}
++
+ func (s *Suite) TestCreateInvalidRegistrationEntry() {
+ 	var invalidRegistrationEntries []*common.RegistrationEntry
+ 	s.getTestDataFromJSONFile(filepath.Join("testdata", "invalid_registration_entries.json"), &invalidRegistrationEntries)

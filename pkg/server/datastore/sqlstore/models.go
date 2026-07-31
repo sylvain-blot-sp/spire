@@ -73,9 +73,12 @@ func (NodeSelector) TableName() string {
 type RegisteredEntry struct {
 	Model
 
-	EntryID  string `gorm:"unique_index"`
-	SpiffeID string `gorm:"index"`
-	ParentID string `gorm:"index"`
+	EntryID string `gorm:"unique_index"`
+	// ParentID is declared before SpiffeID so that the composite index columns
+	// are ordered (parent_id, spiffe_id), which is the order the registration
+	// entry lookups filter on.
+	ParentID string `gorm:"index:idx_registered_entries_parent_id,idx_registered_entries_parent_spiffe"`
+	SpiffeID string `gorm:"index:idx_registered_entries_spiffe_id,idx_registered_entries_parent_spiffe"`
 	// TTL of identities derived from this entry. This field represents the X509-SVID TTL of the Entry
 	TTL           int32
 	Selectors     []Selector

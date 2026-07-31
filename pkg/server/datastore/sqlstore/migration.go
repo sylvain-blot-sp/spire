@@ -280,11 +280,13 @@ import (
 // |*********|********|***************************************************************************|
 // | v1.15.0 |        |                                                                           |
 // | v1.15.1 |        |                                                                           |
+// |---------|--------|---------------------------------------------------------------------------|
+// | v1.15.2 | 26     | Added registered_entries(parent_id, spiffe_id) index                      |
 // ================================================================================================
 
 const (
 	// the latest schema version of the database in the code
-	latestSchemaVersion = 25
+	latestSchemaVersion = 26
 
 	// lastMinorReleaseSchemaVersion is the schema version supported by the
 	// last minor release. When the migrations are opportunistically pruned
@@ -519,6 +521,8 @@ func migrateVersion(tx *gorm.DB, currVersion int, log logrus.FieldLogger) (versi
 		err = migrateToV24(tx)
 	case 24:
 		err = migrateToV25(tx)
+	case 25:
+		err = migrateToV26(tx)
 	default:
 		err = newSQLError("no migration support for unknown schema version %d", currVersion)
 	}
@@ -539,6 +543,17 @@ func migrateToV24(tx *gorm.DB) error {
 
 func migrateToV25(tx *gorm.DB) error {
 	// Add additional_attributes column to registered_entries table
+	if err := tx.AutoMigrate(&RegisteredEntry{}).Error; err != nil {
+		return newWrappedSQLError(err)
+	}
+	return nil
+}
+
+func migrateToV26(tx *gorm.DB) error {
+	// Add the idx_registered_entries_parent_spiffe index on
+	// registered_entries(parent_id, spiffe_id). AutoMigrate skips indexes that
+	// already exist, so deployments that created this index by hand migrate
+	// without doing any work.
 	if err := tx.AutoMigrate(&RegisteredEntry{}).Error; err != nil {
 		return newWrappedSQLError(err)
 	}
