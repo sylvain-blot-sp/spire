@@ -38,6 +38,10 @@ const (
 	// to add clarity
 	Fetch = "fetch"
 
+	// FetchLatest functionality related to fetching the most recent of some
+	// entity; should be used with other tags to add clarity
+	FetchLatest = "fetch_latest"
+
 	// FetchPrivateKey related to fetching a private in the KeyManager plugin interface
 	// (agent)
 	FetchPrivateKey = "fetch_private_key"
@@ -717,6 +721,13 @@ const (
 
 	// EntriesByEntryIDCache functionality related to the entries btree cache indexed by EntryID
 	EntriesByEntryIDCache = "entries_by_entryid_cache"
+
+	// EntryCacheBuild functionality related to building the event-based entry cache
+	EntryCacheBuild = "entry_cache_build"
+
+	// EntryCacheBuildPhase tags which phase of the event-based entry cache build is
+	// being measured
+	EntryCacheBuildPhase = "phase"
 
 	// Cache type tag
 	CacheType = "cache_type"

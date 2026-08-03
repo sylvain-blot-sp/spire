@@ -306,6 +306,9 @@ func (c *Cache) removeEntry(entryID string) {
 }
 
 func (c *Cache) Stats() CacheStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	return CacheStats{
 		AgentsByID:        len(c.agentsByID),
 		AgentsByExpiresAt: c.agentsByExpiresAt.Len(),

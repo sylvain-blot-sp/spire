@@ -44,6 +44,9 @@ type DataStore interface {
 	ListRegistrationEntryEvents(ctx context.Context, req *ListRegistrationEntryEventsRequest) (*ListRegistrationEntryEventsResponse, error)
 	PruneRegistrationEntryEvents(ctx context.Context, olderThan time.Duration) error
 	FetchRegistrationEntryEvent(ctx context.Context, eventID uint) (*RegistrationEntryEvent, error)
+	// FetchLatestRegistrationEntryEventID returns the highest event ID, or
+	// zero if there are no events.
+	FetchLatestRegistrationEntryEventID(ctx context.Context) (uint, error)
 	CreateRegistrationEntryEventForTesting(ctx context.Context, event *RegistrationEntryEvent) error
 	DeleteRegistrationEntryEventForTesting(ctx context.Context, eventID uint) error
 
@@ -63,6 +66,9 @@ type DataStore interface {
 	ListAttestedNodeEvents(ctx context.Context, req *ListAttestedNodeEventsRequest) (*ListAttestedNodeEventsResponse, error)
 	PruneAttestedNodeEvents(ctx context.Context, olderThan time.Duration) error
 	FetchAttestedNodeEvent(ctx context.Context, eventID uint) (*AttestedNodeEvent, error)
+	// FetchLatestAttestedNodeEventID returns the highest event ID, or zero if
+	// there are no events.
+	FetchLatestAttestedNodeEventID(ctx context.Context) (uint, error)
 	CreateAttestedNodeEventForTesting(ctx context.Context, event *AttestedNodeEvent) error
 	DeleteAttestedNodeEventForTesting(ctx context.Context, eventID uint) error
 

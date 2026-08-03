@@ -39,7 +39,18 @@ type attestedNodes struct {
 	eventTimeout time.Duration
 	pageSize     int32
 
+	// startupGapWindow is how many event IDs below the startup watermark are
+	// checked for in-flight transactions. Zero disables bounded seeding and
+	// falls back to scanning the entire retained event history.
+	startupGapWindow uint
+
 	fetchNodes map[string]struct{}
+
+	// build instrumentation, reported by buildCache
+	loadedNodes    int
+	loadedPages    int
+	eventsDuration time.Duration
+	loadDuration   time.Duration
 
 	// metrics change detection
 	skippedNodeEvents int
@@ -58,7 +69,12 @@ func (a *attestedNodes) searchBeforeFirstEvent(ctx context.Context) error {
 	// First event detected, and startup was less than a transaction timout away.
 	if !a.firstEventTime.IsZero() && a.clk.Now().Sub(a.firstEventTime) <= a.eventTimeout {
 		resp, err := a.ds.ListAttestedNodeEvents(ctx, &datastore.ListAttestedNodeEventsRequest{
-			LessThanEventID: a.firstEvent,
+			// With bounded seeding the first event is the watermark, so an
+			// unbounded scan below it would read the whole events table on
+			// every poll. Only the same gap window can hold a transaction
+			// that was still in flight at startup.
+			GreaterThanEventID: a.startupWindowLowerBound(a.firstEvent),
+			LessThanEventID:    a.firstEvent,
 		})
 		if err != nil {
 			return err
@@ -107,6 +123,82 @@ func (a *attestedNodes) selectPolledEvents(ctx context.Context) {
 	}
 }
 
+// seedEvents establishes the event state the cache build starts from. With
+// bounded seeding it costs two indexed reads; without it, it scans the entire
+// retained event history and marks every node it finds for re-fetch, which is
+// the behavior that predates the gap window.
+func (a *attestedNodes) seedEvents(ctx context.Context) error {
+	if a.startupGapWindow == 0 {
+		return a.captureChangedNodes(ctx)
+	}
+	return a.seedWatermark(ctx)
+}
+
+// startupWindowLowerBound returns the exclusive lower bound of the startup gap
+// window below watermark, or zero when bounded seeding is disabled.
+func (a *attestedNodes) startupWindowLowerBound(watermark uint) uint {
+	if a.startupGapWindow == 0 || watermark <= a.startupGapWindow {
+		return 0
+	}
+	return watermark - a.startupGapWindow
+}
+
+// seedWatermark establishes the initial event watermark without listing the
+// entire events table and without marking every node for re-fetch. See
+// registrationEntries.seedWatermark for why this preserves correctness.
+func (a *attestedNodes) seedWatermark(ctx context.Context) error {
+	latest, err := a.ds.FetchLatestAttestedNodeEventID(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch latest attested node event id: %w", err)
+	}
+	if latest == 0 {
+		return nil
+	}
+
+	lowerBound := a.startupWindowLowerBound(latest)
+	resp, err := a.ds.ListAttestedNodeEvents(ctx, &datastore.ListAttestedNodeEventsRequest{
+		GreaterThanEventID: lowerBound,
+		LessThanEventID:    latest + 1,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list attested node events in the startup gap window: %w", err)
+	}
+
+	present := make(map[uint]struct{}, len(resp.Events))
+	oldest := latest
+	for _, event := range resp.Events {
+		present[event.EventID] = struct{}{}
+		oldest = min(oldest, event.EventID)
+	}
+
+	// See registrationEntries.seedWatermark for why a truncated window cannot
+	// skip the pruned prefix.
+	trackFrom := lowerBound + 1
+	if lowerBound == 0 {
+		trackFrom = oldest + 1
+	}
+
+	tracked := 0
+	for eventID := trackFrom; eventID < latest; eventID++ {
+		if _, ok := present[eventID]; !ok {
+			a.eventTracker.StartTracking(eventID)
+			tracked++
+		}
+	}
+
+	a.firstEvent = latest
+	a.lastEvent = latest
+	a.firstEventTime = a.clk.Now()
+
+	a.log.WithFields(logrus.Fields{
+		telemetry.EventID: latest,
+		logFieldEvents:    len(resp.Events),
+		logFieldTracked:   tracked,
+	}).Debug("Seeded attested node event watermark")
+
+	return nil
+}
+
 func (a *attestedNodes) scanForNewEvents(ctx context.Context) error {
 	resp, err := a.ds.ListAttestedNodeEvents(ctx, &datastore.ListAttestedNodeEventsRequest{
 		DataConsistency:    datastore.TolerateStale,
@@ -138,30 +230,48 @@ func (a *attestedNodes) scanForNewEvents(ctx context.Context) error {
 	return nil
 }
 
-func (a *attestedNodes) loadCache(ctx context.Context, cache *authorizedentries.Cache) error {
-	// TODO: determine if this needs paging
-	nodesResp, err := a.ds.ListAttestedNodes(ctx, &datastore.ListAttestedNodesRequest{
-		FetchSelectors: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to list attested nodes: %w", err)
-	}
+func (a *attestedNodes) loadCache(ctx context.Context, sink authorizedentries.CacheSink) error {
+	a.loadedNodes = 0
+	a.loadedPages = 0
 
-	for _, node := range nodesResp.Nodes {
-		agentExpiresAt := time.Unix(node.CertNotAfter, 0)
-		if agentExpiresAt.Before(a.clk.Now()) {
-			continue
+	// Nodes carry their selectors, so an unpaginated list holds every node and
+	// every selector row in memory at once, on top of the entry pages already
+	// in flight. Paginating caps that at one page.
+	var token string
+	for {
+		nodesResp, err := a.ds.ListAttestedNodes(ctx, &datastore.ListAttestedNodesRequest{
+			FetchSelectors: true,
+			Pagination: &datastore.Pagination{
+				Token:    token,
+				PageSize: a.pageSize,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list attested nodes: %w", err)
 		}
-		cache.UpdateAgent(node.SpiffeId, agentExpiresAt, api.ProtoFromSelectors(node.Selectors))
-		a.nodeCache.UpdateAttestedNode(node)
-	}
 
-	return nil
+		for _, node := range nodesResp.Nodes {
+			agentExpiresAt := time.Unix(node.CertNotAfter, 0)
+			if agentExpiresAt.Before(a.clk.Now()) {
+				continue
+			}
+			sink.UpdateAgent(node.SpiffeId, agentExpiresAt, api.ProtoFromSelectors(node.Selectors))
+			a.nodeCache.UpdateAttestedNode(node)
+			a.loadedNodes++
+		}
+		a.loadedPages++
+
+		token = nodesResp.Pagination.Token
+		if token == "" {
+			return nil
+		}
+	}
 }
 
-// buildAttestedNodesCache fetches all attested nodes and adds the unexpired ones to the cache.
-// It runs once at startup.
-func buildAttestedNodesCache(ctx context.Context, log logrus.FieldLogger, metrics telemetry.Metrics, ds datastore.DataStore, clk clock.Clock, cache *authorizedentries.Cache, nodeCache *nodecache.Cache, pageSize int32, cacheReloadInterval, eventTimeout time.Duration) (*attestedNodes, error) {
+// buildAttestedNodesCache fetches all attested nodes and writes the unexpired
+// ones into sink. It runs once at startup. The caller is responsible for
+// assigning the finished cache once the sink has produced it.
+func buildAttestedNodesCache(ctx context.Context, log logrus.FieldLogger, metrics telemetry.Metrics, ds datastore.DataStore, clk clock.Clock, sink authorizedentries.CacheSink, nodeCache *nodecache.Cache, pageSize int32, cacheReloadInterval, eventTimeout time.Duration, startupGapWindow uint) (*attestedNodes, error) {
 	if pageSize <= 0 {
 		return nil, fmt.Errorf("page size must be positive, got %d", pageSize)
 	}
@@ -169,14 +279,14 @@ func buildAttestedNodesCache(ctx context.Context, log logrus.FieldLogger, metric
 	pollPeriods := PollPeriods(cacheReloadInterval, eventTimeout)
 
 	attestedNodes := &attestedNodes{
-		cache:        cache,
-		nodeCache:    nodeCache,
-		clk:          clk,
-		ds:           ds,
-		log:          log,
-		metrics:      metrics,
-		eventTimeout: eventTimeout,
-		pageSize:     pageSize,
+		nodeCache:        nodeCache,
+		clk:              clk,
+		ds:               ds,
+		log:              log,
+		metrics:          metrics,
+		eventTimeout:     eventTimeout,
+		pageSize:         pageSize,
+		startupGapWindow: startupGapWindow,
 
 		eventsBeforeFirst: make(map[uint]struct{}),
 		fetchNodes:        make(map[string]struct{}),
@@ -191,15 +301,21 @@ func buildAttestedNodesCache(ctx context.Context, log logrus.FieldLogger, metric
 		},
 	}
 
-	if err := attestedNodes.captureChangedNodes(ctx); err != nil {
+	eventsStart := time.Now()
+	if err := attestedNodes.seedEvents(ctx); err != nil {
 		return nil, err
 	}
+	attestedNodes.eventsDuration = time.Since(eventsStart)
+	server_telemetry.MeasureEntryCacheBuildPhase(metrics, server_telemetry.EntryCacheBuildPhaseNodeEvents, eventsStart)
 
-	if err := attestedNodes.loadCache(ctx, cache); err != nil {
+	loadStart := time.Now()
+	if err := attestedNodes.loadCache(ctx, sink); err != nil {
 		return nil, err
 	}
+	attestedNodes.loadDuration = time.Since(loadStart)
+	server_telemetry.MeasureEntryCacheBuildPhase(metrics, server_telemetry.EntryCacheBuildPhaseNodeLoad, loadStart)
 
-	attestedNodes.emitMetrics()
+	attestedNodes.emitMetrics(sink.Stats())
 
 	return attestedNodes, nil
 }
@@ -213,7 +329,7 @@ func (a *attestedNodes) updateCache(ctx context.Context) error {
 	if err := a.updateCachedNodes(ctx); err != nil {
 		return err
 	}
-	a.emitMetrics()
+	a.emitMetrics(a.cache.Stats())
 
 	return nil
 }
@@ -257,13 +373,14 @@ func (a *attestedNodes) swapCache(cache *authorizedentries.Cache) {
 	a.fetchNodes = make(map[string]struct{})
 }
 
-func (a *attestedNodes) emitMetrics() {
+// emitMetrics reports the gauges for cacheStats, which during a build belong
+// to the cache being built rather than the published one.
+func (a *attestedNodes) emitMetrics(cacheStats authorizedentries.CacheStats) {
 	if a.skippedNodeEvents != a.eventTracker.EventCount() {
 		a.skippedNodeEvents = a.eventTracker.EventCount()
 		server_telemetry.SetSkippedNodeEventIDsCacheCountGauge(a.metrics, a.skippedNodeEvents)
 	}
 
-	cacheStats := a.cache.Stats()
 	// AgentsByID and AgentsByExpiresAt should be the same.
 	if a.lastCacheStats.AgentsByID != cacheStats.AgentsByID {
 		a.lastCacheStats.AgentsByID = cacheStats.AgentsByID

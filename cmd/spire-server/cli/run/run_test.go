@@ -3,6 +3,7 @@ package run
 import (
 	"crypto/x509/pkix"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -518,6 +519,8 @@ func TestMergeInput(t *testing.T) {
 }
 
 func TestNewServerConfig(t *testing.T) {
+	gapWindow, zeroGapWindow, negativeGapWindow := 500, 0, -1
+
 	assertLogsContainEntries := func(expectedEntries []spiretest.LogEntry) func(t *testing.T) []log.Option {
 		return func(t *testing.T) []log.Option {
 			return []log.Option{
@@ -1239,6 +1242,81 @@ func TestNewServerConfig(t *testing.T) {
 			expectError: true,
 			input: func(c *Config) {
 				c.Server.Experimental.FullCacheReloadInterval = "c"
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Nil(t, c)
+			},
+		},
+		{
+			msg: "events_based_cache_page_size defaults to zero, letting the server choose",
+			input: func(c *Config) {
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Zero(t, c.EventsBasedCachePageSize)
+			},
+		},
+		{
+			msg: "events_based_cache_page_size is correctly parsed",
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCachePageSize = 25000
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Equal(t, int32(25000), c.EventsBasedCachePageSize)
+			},
+		},
+		{
+			msg:         "negative events_based_cache_page_size returns an error",
+			expectError: true,
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCachePageSize = -1
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Nil(t, c)
+			},
+		},
+		{
+			msg:         "out of range events_based_cache_page_size returns an error",
+			expectError: true,
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCachePageSize = math.MaxInt32 + 1
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Nil(t, c)
+			},
+		},
+		{
+			msg: "events_based_cache_startup_gap_window defaults to unset, letting the server choose",
+			input: func(c *Config) {
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.Nil(t, c.EventsBasedCacheStartupGapWindow)
+			},
+		},
+		{
+			msg: "events_based_cache_startup_gap_window is correctly parsed",
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCacheStartupGapWindow = &gapWindow
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.NotNil(t, c.EventsBasedCacheStartupGapWindow)
+				require.Equal(t, uint(500), *c.EventsBasedCacheStartupGapWindow)
+			},
+		},
+		{
+			msg: "a zero events_based_cache_startup_gap_window disables bounded seeding",
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCacheStartupGapWindow = &zeroGapWindow
+			},
+			test: func(t *testing.T, c *server.Config) {
+				require.NotNil(t, c.EventsBasedCacheStartupGapWindow)
+				require.Zero(t, *c.EventsBasedCacheStartupGapWindow)
+			},
+		},
+		{
+			msg:         "negative events_based_cache_startup_gap_window returns an error",
+			expectError: true,
+			input: func(c *Config) {
+				c.Server.Experimental.EventsBasedCacheStartupGapWindow = &negativeGapWindow
 			},
 			test: func(t *testing.T, c *server.Config) {
 				require.Nil(t, c)

@@ -34,6 +34,12 @@ func StartFetchRegistrationEntryEventCall(m telemetry.Metrics) *telemetry.CallCo
 	return telemetry.StartCall(m, telemetry.Datastore, telemetry.RegistrationEntryEvent, telemetry.Fetch)
 }
 
+// StartFetchLatestRegistrationEntryEventIDCall return metric
+// for server's datastore, on fetching the latest registration entry event ID.
+func StartFetchLatestRegistrationEntryEventIDCall(m telemetry.Metrics) *telemetry.CallCounter {
+	return telemetry.StartCall(m, telemetry.Datastore, telemetry.RegistrationEntryEvent, telemetry.FetchLatest)
+}
+
 // StartListAttestedNodeEventsCall return metric
 // for server's datastore, on listing attested node events.
 func StartListAttestedNodeEventsCall(m telemetry.Metrics) *telemetry.CallCounter {
@@ -62,4 +68,10 @@ func StartDeleteAttestedNodeEventForTestingCall(m telemetry.Metrics) *telemetry.
 // for server's datastore, on fetching an attested node event.
 func StartFetchAttestedNodeEventCall(m telemetry.Metrics) *telemetry.CallCounter {
 	return telemetry.StartCall(m, telemetry.Datastore, telemetry.NodeEvent, telemetry.Fetch)
+}
+
+// StartFetchLatestAttestedNodeEventIDCall return metric
+// for server's datastore, on fetching the latest attested node event ID.
+func StartFetchLatestAttestedNodeEventIDCall(m telemetry.Metrics) *telemetry.CallCounter {
+	return telemetry.StartCall(m, telemetry.Datastore, telemetry.NodeEvent, telemetry.FetchLatest)
 }

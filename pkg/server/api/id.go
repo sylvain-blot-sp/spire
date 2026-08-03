@@ -98,6 +98,26 @@ func ProtoFromID(id spiffeid.ID) *types.SPIFFEID {
 	}
 }
 
+// protoFromIDInterned shares the trust domain name across conversions. The
+// path is left alone: workload paths are effectively unique, so interning them
+// would grow the interner without collapsing anything.
+func protoFromIDInterned(id spiffeid.ID, interner *StringInterner) *types.SPIFFEID {
+	return &types.SPIFFEID{
+		TrustDomain: interner.Intern(id.TrustDomain().Name()),
+		Path:        id.Path(),
+	}
+}
+
+// protoFromParentIDInterned also shares the path. Many entries hang off the
+// same parent, and the shared copy releases the row string the path was sliced
+// from.
+func protoFromParentIDInterned(id spiffeid.ID, interner *StringInterner) *types.SPIFFEID {
+	return &types.SPIFFEID{
+		TrustDomain: interner.Intern(id.TrustDomain().Name()),
+		Path:        interner.Intern(id.Path()),
+	}
+}
+
 // IDFromProto converts a SPIFFEID message into an ID type
 func IDFromProto(_ context.Context, protoID *types.SPIFFEID) (spiffeid.ID, error) {
 	if protoID == nil {

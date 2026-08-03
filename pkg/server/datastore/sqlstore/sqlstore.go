@@ -65,8 +65,12 @@ const (
 	// PostgreSQL database type provided by an AWS service
 	AWSPostgreSQL = "aws_postgres"
 
-	// Maximum size for preallocation in a paginated request
-	maxResultPreallocation = 1000
+	// Maximum size for preallocation in a paginated request. This covers the
+	// default entry cache page size, whose pages would otherwise be grown and
+	// copied several times each during a cold cache load. It is still capped
+	// so that a caller asking for an enormous page cannot force a
+	// correspondingly enormous speculative allocation.
+	maxResultPreallocation = 10000
 
 	// Maximum size for additional attributes message in a registration entry
 	maxAdditionalAttributesSize = 65535
@@ -422,6 +426,12 @@ func (ds *Plugin) ListAttestedNodeEvents(ctx context.Context, req *datastore.Lis
 	return listAttestedNodeEvents(ds.db, req)
 }
 
+// FetchLatestAttestedNodeEventID returns the highest attested node event ID,
+// or zero if there are no events.
+func (ds *Plugin) FetchLatestAttestedNodeEventID(_ context.Context) (uint, error) {
+	return fetchLatestEventID(ds.db, &AttestedNodeEvent{})
+}
+
 // PruneAttestedNodeEvents deletes all attested node events older than a specified duration (i.e. more than 24 hours old)
 func (ds *Plugin) PruneAttestedNodeEvents(ctx context.Context, olderThan time.Duration) (err error) {
 	return ds.withWriteTx(ctx, func(tx *gorm.DB) (err error) {
@@ -627,6 +637,12 @@ func (ds *Plugin) ListRegistrationEntryEvents(ctx context.Context, req *datastor
 		return listRegistrationEntryEvents(ds.roDb, req)
 	}
 	return listRegistrationEntryEvents(ds.db, req)
+}
+
+// FetchLatestRegistrationEntryEventID returns the highest registration entry
+// event ID, or zero if there are no events.
+func (ds *Plugin) FetchLatestRegistrationEntryEventID(_ context.Context) (uint, error) {
+	return fetchLatestEventID(ds.db, &RegisteredEntryEvent{})
 }
 
 // PruneRegistrationEntryEvents deletes all registration entry events older than a specified duration (i.e. more than 24 hours old)
@@ -1799,19 +1815,8 @@ func createAttestedNodeEvent(tx *gorm.DB, event *datastore.AttestedNodeEvent) er
 func listAttestedNodeEvents(db *sqlDB, req *datastore.ListAttestedNodeEventsRequest) (*datastore.ListAttestedNodeEventsResponse, error) {
 	var events []AttestedNodeEvent
 
-	if req.GreaterThanEventID != 0 || req.LessThanEventID != 0 {
-		query, id, err := buildListEventsQueryString(req.GreaterThanEventID, req.LessThanEventID)
-		if err != nil {
-			return nil, newWrappedSQLError(err)
-		}
-
-		if err := db.Find(&events, query.String(), id).Order("id asc").Error; err != nil {
-			return nil, newWrappedSQLError(err)
-		}
-	} else {
-		if err := db.Find(&events).Order("id asc").Error; err != nil {
-			return nil, newWrappedSQLError(err)
-		}
+	if err := db.Find(&events, buildListEventsQuery(req.GreaterThanEventID, req.LessThanEventID)...).Order("id asc").Error; err != nil {
+		return nil, newWrappedSQLError(err)
 	}
 
 	resp := &datastore.ListAttestedNodeEventsResponse{
@@ -4308,19 +4313,8 @@ func deleteRegistrationEntryEvent(tx *gorm.DB, eventID uint) error {
 func listRegistrationEntryEvents(db *sqlDB, req *datastore.ListRegistrationEntryEventsRequest) (*datastore.ListRegistrationEntryEventsResponse, error) {
 	var events []RegisteredEntryEvent
 
-	if req.GreaterThanEventID != 0 || req.LessThanEventID != 0 {
-		query, id, err := buildListEventsQueryString(req.GreaterThanEventID, req.LessThanEventID)
-		if err != nil {
-			return nil, newWrappedSQLError(err)
-		}
-
-		if err := db.Find(&events, query.String(), id).Order("id asc").Error; err != nil {
-			return nil, newWrappedSQLError(err)
-		}
-	} else {
-		if err := db.Find(&events).Order("id asc").Error; err != nil {
-			return nil, newWrappedSQLError(err)
-		}
+	if err := db.Find(&events, buildListEventsQuery(req.GreaterThanEventID, req.LessThanEventID)...).Order("id asc").Error; err != nil {
+		return nil, newWrappedSQLError(err)
 	}
 
 	resp := &datastore.ListRegistrationEntryEventsResponse{
@@ -4342,24 +4336,40 @@ func pruneRegistrationEntryEvents(tx *gorm.DB, olderThan time.Duration) error {
 	return nil
 }
 
-func buildListEventsQueryString(greaterThanEventID, lessThanEventID uint) (*strings.Builder, uint, error) {
-	if greaterThanEventID != 0 && lessThanEventID != 0 {
-		return nil, 0, errors.New("can't set both greater and less than event id")
+// fetchLatestEventID reads the highest event ID from the given event table,
+// returning zero when the table is empty. The lookup is an index-only read of
+// the primary key, so it stays cheap no matter how many events are retained.
+func fetchLatestEventID(db *sqlDB, model any) (uint, error) {
+	var result struct{ ID uint }
+	if err := db.Model(model).Select("id").Order("id desc").Limit(1).Scan(&result).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, nil
+		}
+		return 0, newWrappedSQLError(err)
 	}
+	return result.ID, nil
+}
 
-	var id uint
-	query := new(strings.Builder)
-	query.WriteString("id ")
+// buildListEventsQuery builds the gorm where clause for an exclusive event ID
+// bound, ready to be spread into Find. Either bound may be omitted by passing
+// zero, and both may be given to select a range. When neither is given the
+// result is empty, which selects every event. The generated predicate is plain
+// SQL supported by every dialect.
+func buildListEventsQuery(greaterThanEventID, lessThanEventID uint) []any {
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 3)
 	if greaterThanEventID != 0 {
-		query.WriteString("> ?")
-		id = greaterThanEventID
+		conditions = append(conditions, "id > ?")
+		args = append(args, greaterThanEventID)
 	}
 	if lessThanEventID != 0 {
-		query.WriteString("< ?")
-		id = lessThanEventID
+		conditions = append(conditions, "id < ?")
+		args = append(args, lessThanEventID)
 	}
-
-	return query, id, nil
+	if len(conditions) == 0 {
+		return nil
+	}
+	return append([]any{strings.Join(conditions, " AND ")}, args...)
 }
 
 func createJoinToken(tx *gorm.DB, token *datastore.JoinToken) error {

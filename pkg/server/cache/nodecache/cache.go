@@ -28,7 +28,21 @@ type Cache struct {
 }
 
 func New(ctx context.Context, log logrus.FieldLogger, ds datastore.DataStore, clk clock.Clock, automaticRefresh, enableCache bool) (*Cache, error) {
-	cache := &Cache{
+	cache := NewEmpty(log, ds, clk, automaticRefresh, enableCache)
+
+	err := cache.Rebuild(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return cache, nil
+}
+
+// NewEmpty returns a cache that has not read the node table yet. Callers that
+// are about to populate it themselves use this to avoid a redundant read of
+// every attested node, which is expensive on large deployments.
+func NewEmpty(log logrus.FieldLogger, ds datastore.DataStore, clk clock.Clock, automaticRefresh, enableCache bool) *Cache {
+	return &Cache{
 		log:              log,
 		ds:               ds,
 		clk:              clk,
@@ -37,13 +51,6 @@ func New(ctx context.Context, log logrus.FieldLogger, ds datastore.DataStore, cl
 		nodes:            make(map[string]*common.AttestedNode),
 		nodeRefreshTime:  make(map[string]time.Time),
 	}
-
-	err := cache.Rebuild(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return cache, nil
 }
 
 func (c *Cache) LookupAttestedNode(id string) (*common.AttestedNode, time.Time) {

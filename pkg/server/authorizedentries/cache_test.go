@@ -298,19 +298,39 @@ func (a *cacheTest) withExpiredAgent(node spiffeid.ID, expiredBy time.Duration, 
 func (a *cacheTest) hydrate(tb testing.TB) (*cacheTest, *Cache) {
 	clk := clock.NewMock(tb)
 	cache := NewCache(clk, "domain.test")
+	a.fill(cache)
+	return a, cache
+}
+
+// hydrateBuilder produces the same cache through the bulk build path.
+func (a *cacheTest) hydrateBuilder(tb testing.TB) (*cacheTest, *Cache) {
+	clk := clock.NewMock(tb)
+	builder := NewCacheBuilder(clk, "domain.test", CacheSizeHint{
+		Entries: len(a.entries),
+		Agents:  len(a.agents),
+	})
+	a.fill(builder)
+	return a, builder.Build()
+}
+
+func (a *cacheTest) fill(sink CacheSink) {
 	for _, entry := range a.entries {
-		cache.UpdateEntry(entry)
+		sink.UpdateEntry(entry)
 	}
 	for agent, info := range a.agents {
-		cache.UpdateAgent(agent.String(), info.ExpiresAt, info.Selectors)
+		sink.UpdateAgent(agent.String(), info.ExpiresAt, info.Selectors)
 	}
-	return a, cache
 }
 
 func (a *cacheTest) assertAuthorizedEntries(t *testing.T, agent spiffeid.ID, expectEntries ...*types.Entry) {
 	t.Helper()
 	_, cache := a.hydrate(t)
 	assertAuthorizedEntries(t, cache, agent, a.entries, expectEntries...)
+
+	// The bulk build path must be indistinguishable from the incremental one.
+	_, builtCache := a.hydrateBuilder(t)
+	assertAuthorizedEntries(t, builtCache, agent, a.entries, expectEntries...)
+	require.Equal(t, cache.Stats(), builtCache.Stats(), "bulk built cache has different index sizes")
 }
 
 func makeAlias(alias spiffeid.ID, selectors ...*types.Selector) *types.Entry {

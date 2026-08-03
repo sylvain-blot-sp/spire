@@ -218,6 +218,13 @@ func (s *DataStore) FetchAttestedNodeEvent(ctx context.Context, eventID uint) (*
 	return s.ds.FetchAttestedNodeEvent(ctx, eventID)
 }
 
+func (s *DataStore) FetchLatestAttestedNodeEventID(ctx context.Context) (uint, error) {
+	if err := s.getNextError(); err != nil {
+		return 0, err
+	}
+	return s.ds.FetchLatestAttestedNodeEventID(ctx)
+}
+
 func (s *DataStore) TaintX509CA(ctx context.Context, trustDomainID string, subjectKeyIDToTaint string) error {
 	if err := s.getNextError(); err != nil {
 		return err
@@ -373,6 +380,13 @@ func (s *DataStore) FetchRegistrationEntryEvent(ctx context.Context, eventID uin
 		return nil, err
 	}
 	return s.ds.FetchRegistrationEntryEvent(ctx, eventID)
+}
+
+func (s *DataStore) FetchLatestRegistrationEntryEventID(ctx context.Context) (uint, error) {
+	if err := s.getNextError(); err != nil {
+		return 0, err
+	}
+	return s.ds.FetchLatestRegistrationEntryEventID(ctx)
 }
 
 func (s *DataStore) CreateJoinToken(ctx context.Context, token *datastore.JoinToken) error {

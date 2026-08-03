@@ -3,9 +3,11 @@ package endpoints
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +58,35 @@ var (
 
 	noNodeFetches = []string{}
 )
+
+// TestLoadNodeCachePaginates proves the startup node load walks the pagination
+// cursor rather than reading every node in one response.
+func TestLoadNodeCachePaginates(t *testing.T) {
+	const nodeCount = 25
+	const pageSize = 10
+
+	nodes := make([]*common.AttestedNode, 0, nodeCount)
+	for i := range nodeCount {
+		nodes = append(nodes, &common.AttestedNode{
+			SpiffeId:     fmt.Sprintf("spiffe://example.org/test_node_%02d", i),
+			CertNotAfter: time.Now().Add(240 * time.Hour).Unix(),
+			Selectors:    []*common.Selector{{Type: "test", Value: strconv.Itoa(i)}},
+		})
+	}
+
+	scenario := NewNodeScenario(t, &nodeScenarioSetup{
+		attestedNodes: nodes,
+		pageSize:      pageSize,
+	})
+
+	attestedNodes, err := scenario.buildAttestedNodesCache()
+	require.NoError(t, err)
+
+	require.Equal(t, nodeCount, attestedNodes.loadedNodes)
+	// Three pages of nodes, plus the empty page that ends the walk.
+	require.Equal(t, 4, attestedNodes.loadedPages)
+	require.Equal(t, nodeCount, attestedNodes.cache.Stats().AgentsByID)
+}
 
 type expectedGauge struct {
 	Key   []string
@@ -1520,6 +1551,9 @@ type scenario struct {
 	metrics  *fakemetrics.FakeMetrics
 	ds       *fakedatastore.DataStore
 	pageSize int32
+	// startupGapWindow is passed through to the cache build. Zero keeps the
+	// pre-existing behavior of seeding from the entire retained event history.
+	startupGapWindow uint
 }
 
 type nodeScenarioSetup struct {
@@ -1527,6 +1561,7 @@ type nodeScenarioSetup struct {
 	attestedNodeEvents []*datastore.AttestedNodeEvent
 	err                error
 	pageSize           int32
+	startupGapWindow   uint
 }
 
 func NewNodeScenario(t *testing.T, setup *nodeScenarioSetup) *scenario {
@@ -1576,6 +1611,8 @@ func NewNodeScenario(t *testing.T, setup *nodeScenarioSetup) *scenario {
 		metrics:  metrics,
 		ds:       ds,
 		pageSize: pageSize,
+
+		startupGapWindow: setup.startupGapWindow,
 	}
 }
 
@@ -1585,8 +1622,10 @@ func (s *scenario) buildAttestedNodesCache() (*attestedNodes, error) {
 		return nil, err
 	}
 
-	attestedNodes, err := buildAttestedNodesCache(s.ctx, s.log, s.metrics, s.ds, s.clk, s.cache, nodeCache, s.pageSize, defaultCacheReloadInterval, defaultEventTimeout)
+	attestedNodes, err := buildAttestedNodesCache(s.ctx, s.log, s.metrics, s.ds, s.clk, s.cache, nodeCache, s.pageSize, defaultCacheReloadInterval, defaultEventTimeout, s.startupGapWindow)
 	if attestedNodes != nil {
+		// Publish the cache, as buildCache does once the sink is finished.
+		attestedNodes.cache = s.cache
 		// clear out the fetches
 		for node := range attestedNodes.fetchNodes {
 			delete(attestedNodes.fetchNodes, node)

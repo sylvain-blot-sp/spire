@@ -2081,10 +2081,18 @@ func (s *PluginSuite) TestListAttestedNodeEvents() {
 			expectedEvents:     []datastore.AttestedNodeEvent{},
 		},
 		{
-			name:               "Setting both greater and less than",
+			name:                 "Both greater and less than select an exclusive range",
+			greaterThanEventID:   1,
+			lessThanEventID:      uint(len(expectedEvents)),
+			expectedFirstEventID: 2,
+			expectedLastEventID:  uint(len(expectedEvents)) - 1,
+			expectedEvents:       expectedEvents[1 : len(expectedEvents)-1],
+		},
+		{
+			name:               "Both greater and less than with an empty range",
 			greaterThanEventID: 1,
-			lessThanEventID:    1,
-			expectedErr:        "datastore-sql: can't set both greater and less than event id",
+			lessThanEventID:    2,
+			expectedEvents:     []datastore.AttestedNodeEvent{},
 		},
 	}
 	for _, test := range tests {
@@ -2106,6 +2114,54 @@ func (s *PluginSuite) TestListAttestedNodeEvents() {
 			}
 		})
 	}
+}
+
+func (s *PluginSuite) TestFetchLatestAttestedNodeEventID() {
+	eventID, err := s.ds.FetchLatestAttestedNodeEventID(ctx)
+	s.Require().NoError(err)
+	s.Require().Zero(eventID, "expected zero for an empty event table")
+
+	for i := range 3 {
+		err := s.ds.CreateAttestedNodeEventForTesting(ctx, &datastore.AttestedNodeEvent{
+			EventID:  uint(i + 1),
+			SpiffeID: fmt.Sprintf("spiffe://example.org/node-%d", i),
+		})
+		s.Require().NoError(err)
+
+		eventID, err := s.ds.FetchLatestAttestedNodeEventID(ctx)
+		s.Require().NoError(err)
+		s.Require().Equal(uint(i+1), eventID)
+	}
+
+	// Deleting the newest event must move the watermark back.
+	s.Require().NoError(s.ds.DeleteAttestedNodeEventForTesting(ctx, 3))
+	eventID, err = s.ds.FetchLatestAttestedNodeEventID(ctx)
+	s.Require().NoError(err)
+	s.Require().Equal(uint(2), eventID)
+}
+
+func (s *PluginSuite) TestFetchLatestRegistrationEntryEventID() {
+	eventID, err := s.ds.FetchLatestRegistrationEntryEventID(ctx)
+	s.Require().NoError(err)
+	s.Require().Zero(eventID, "expected zero for an empty event table")
+
+	for i := range 3 {
+		err := s.ds.CreateRegistrationEntryEventForTesting(ctx, &datastore.RegistrationEntryEvent{
+			EventID: uint(i + 1),
+			EntryID: fmt.Sprintf("entry-%d", i),
+		})
+		s.Require().NoError(err)
+
+		eventID, err := s.ds.FetchLatestRegistrationEntryEventID(ctx)
+		s.Require().NoError(err)
+		s.Require().Equal(uint(i+1), eventID)
+	}
+
+	// Deleting the newest event must move the watermark back.
+	s.Require().NoError(s.ds.DeleteRegistrationEntryEventForTesting(ctx, 3))
+	eventID, err = s.ds.FetchLatestRegistrationEntryEventID(ctx)
+	s.Require().NoError(err)
+	s.Require().Equal(uint(2), eventID)
 }
 
 func (s *PluginSuite) TestPruneAttestedNodeEvents() {
@@ -4888,10 +4944,18 @@ func (s *PluginSuite) TestListRegistrationEntryEvents() {
 			expectedEvents:     []datastore.RegistrationEntryEvent{},
 		},
 		{
-			name:               "Setting both greater and less than",
+			name:                 "Both greater and less than select an exclusive range",
+			greaterThanEventID:   1,
+			lessThanEventID:      uint(len(expectedEvents)),
+			expectedFirstEventID: 2,
+			expectedLastEventID:  uint(len(expectedEvents)) - 1,
+			expectedEvents:       expectedEvents[1 : len(expectedEvents)-1],
+		},
+		{
+			name:               "Both greater and less than with an empty range",
 			greaterThanEventID: 1,
-			lessThanEventID:    1,
-			expectedErr:        "datastore-sql: can't set both greater and less than event id",
+			lessThanEventID:    2,
+			expectedEvents:     []datastore.RegistrationEntryEvent{},
 		},
 	}
 	for _, test := range tests {

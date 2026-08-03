@@ -40,6 +40,26 @@ var (
 	}
 )
 
+func TestNewEmptyDoesNotReadTheNodeTable(t *testing.T) {
+	ds := fakedatastore.New(t)
+	clk := clock.NewMock(t)
+	log, _ := test.NewNullLogger()
+
+	_, err := ds.CreateAttestedNode(t.Context(), firstAgent)
+	require.NoError(t, err)
+
+	cache := NewEmpty(log, ds, clk, true, true)
+
+	cachedFirstAgent, _ := cache.LookupAttestedNode(firstAgent.SpiffeId)
+	require.Nil(t, cachedFirstAgent, "the cache read the node table it was told to skip")
+
+	// The caller populates it, and lookups work from there on.
+	cache.UpdateAttestedNode(firstAgent)
+	cachedFirstAgent, firstAgentTime := cache.LookupAttestedNode(firstAgent.SpiffeId)
+	spiretest.AssertProtoEqual(t, firstAgent, cachedFirstAgent)
+	require.Equal(t, clk.Now(), firstAgentTime)
+}
+
 func TestCacheEnabled(t *testing.T) {
 	ds := fakedatastore.New(t)
 	clk := clock.NewMock(t)

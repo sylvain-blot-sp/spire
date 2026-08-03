@@ -143,6 +143,12 @@ func (w metricsWrapper) FetchAttestedNodeEvent(ctx context.Context, eventID uint
 	return w.ds.FetchAttestedNodeEvent(ctx, eventID)
 }
 
+func (w metricsWrapper) FetchLatestAttestedNodeEventID(ctx context.Context) (_ uint, err error) {
+	callCounter := StartFetchLatestAttestedNodeEventIDCall(w.m)
+	defer callCounter.Done(&err)
+	return w.ds.FetchLatestAttestedNodeEventID(ctx)
+}
+
 func (w metricsWrapper) FetchBundle(ctx context.Context, trustDomain string) (_ *common.Bundle, err error) {
 	callCounter := StartFetchBundleCall(w.m)
 	defer callCounter.Done(&err)
@@ -171,6 +177,12 @@ func (w metricsWrapper) FetchRegistrationEntryEvent(ctx context.Context, eventID
 	callCounter := StartFetchRegistrationEntryEventCall(w.m)
 	defer callCounter.Done(&err)
 	return w.ds.FetchRegistrationEntryEvent(ctx, eventID)
+}
+
+func (w metricsWrapper) FetchLatestRegistrationEntryEventID(ctx context.Context) (_ uint, err error) {
+	callCounter := StartFetchLatestRegistrationEntryEventIDCall(w.m)
+	defer callCounter.Done(&err)
+	return w.ds.FetchLatestRegistrationEntryEventID(ctx)
 }
 
 func (w metricsWrapper) FetchFederationRelationship(ctx context.Context, trustDomain spiffeid.TrustDomain) (_ *datastore.FederationRelationship, err error) {

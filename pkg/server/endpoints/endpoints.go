@@ -164,9 +164,18 @@ func New(ctx context.Context, c Config) (*Endpoints, error) {
 
 	ds := c.Catalog.GetDataStore()
 
-	nodeCache, err := nodecache.New(ctx, c.Log, ds, c.Clock, true, c.MaxAttestedNodeInfoStaleness != 0)
-	if err != nil {
-		return nil, err
+	var nodeCache *nodecache.Cache
+	if c.EventsBasedCache {
+		// The events based cache reads every attested node while building the
+		// entry cache and populates the node cache as it goes, so an eager
+		// rebuild here would read the whole node table a second time.
+		nodeCache = nodecache.NewEmpty(c.Log, ds, c.Clock, true, c.MaxAttestedNodeInfoStaleness != 0)
+	} else {
+		var err error
+		nodeCache, err = nodecache.New(ctx, c.Log, ds, c.Clock, true, c.MaxAttestedNodeInfoStaleness != 0)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var ef api.AuthorizedEntryFetcher
@@ -182,6 +191,8 @@ func New(ctx context.Context, c Config) (*Endpoints, error) {
 			fullCacheReloadInterval: c.FullCacheReloadInterval,
 			pruneEventsOlderThan:    c.PruneEventsOlderThan,
 			eventTimeout:            c.EventTimeout,
+			pageSize:                c.EventsBasedCachePageSize,
+			startupGapWindow:        c.EventsBasedCacheStartupGapWindow,
 		})
 		if err != nil {
 			return nil, err

@@ -12,6 +12,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/spire/pkg/common/idutil"
 	"github.com/spiffe/spire/pkg/common/telemetry"
+	server_telemetry "github.com/spiffe/spire/pkg/common/telemetry/server"
 	"github.com/spiffe/spire/pkg/server/api"
 	"github.com/spiffe/spire/pkg/server/authorizedentries"
 	"github.com/spiffe/spire/pkg/server/cache/nodecache"
@@ -48,7 +49,7 @@ func TestNewAuthorizedEntryFetcherEvents(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, ef)
 
-	buildMetrics := []fakemetrics.MetricItem{
+	buildMetrics := append([]fakemetrics.MetricItem{
 		agentsByIDMetric(0),
 		agentsByIDExpiresAtMetric(0),
 		nodeAliasesByEntryIDMetric(0),
@@ -57,7 +58,9 @@ func TestNewAuthorizedEntryFetcherEvents(t *testing.T) {
 
 		entriesByEntryIDMetric(0),
 		entriesSkippedEventMetric(0),
-	}
+
+		entryCacheBuildPhaseMetric(server_telemetry.EntryCacheBuildPhaseTotal),
+	}, entryCacheBuildSubcacheMetrics()...)
 
 	assert.ElementsMatch(t, buildMetrics, metrics.AllMetrics(), "should emit metrics for node aliases, entries, and agents")
 	metrics.Reset()
@@ -211,13 +214,15 @@ func TestBuildCacheSavesSkippedEvents(t *testing.T) {
 
 	cache := authorizedentries.NewCache(clk, "example.org")
 
-	registrationEntries, err := buildRegistrationEntriesCache(ctx, log, metrics, ds, clk, cache, pageSize, defaultCacheReloadInterval, defaultEventTimeout)
+	registrationEntries, err := buildRegistrationEntriesCache(ctx, log, metrics, ds, clk, cache, defaultPageSize, defaultCacheReloadInterval, defaultEventTimeout, 0)
 	require.NoError(t, err)
 	require.NotNil(t, registrationEntries)
+	registrationEntries.cache = cache
 
-	attestedNodes, err := buildAttestedNodesCache(ctx, log, metrics, ds, clk, cache, nodeCache, pageSize, defaultCacheReloadInterval, defaultEventTimeout)
+	attestedNodes, err := buildAttestedNodesCache(ctx, log, metrics, ds, clk, cache, nodeCache, defaultPageSize, defaultCacheReloadInterval, defaultEventTimeout, 0)
 	require.NoError(t, err)
 	require.NotNil(t, attestedNodes)
+	attestedNodes.cache = cache
 
 	assert.Contains(t, registrationEntries.eventTracker.events, uint(2))
 	assert.Equal(t, uint(3), registrationEntries.lastEvent)
@@ -227,7 +232,7 @@ func TestBuildCacheSavesSkippedEvents(t *testing.T) {
 	assert.Equal(t, uint(4), attestedNodes.lastEvent)
 
 	// Assert zero metrics since the updateCache() method doesn't get called right at built time.
-	expectedMetrics := []fakemetrics.MetricItem{
+	expectedMetrics := append([]fakemetrics.MetricItem{
 		agentsByIDMetric(0),
 		agentsByIDExpiresAtMetric(0),
 		nodeAliasesByEntryIDMetric(0),
@@ -236,7 +241,7 @@ func TestBuildCacheSavesSkippedEvents(t *testing.T) {
 
 		entriesByEntryIDMetric(0),
 		entriesSkippedEventMetric(1),
-	}
+	}, entryCacheBuildSubcacheMetrics()...)
 	assert.ElementsMatch(t, expectedMetrics, metrics.AllMetrics(), "should emit no metrics")
 }
 
@@ -261,9 +266,7 @@ func TestRunUpdateCacheTaskDoesFullUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ef)
 
-	ef.mu.RLock()
-	initialCache := ef.cache
-	ef.mu.RUnlock()
+	initialCache := ef.cache.Load()
 
 	// Start Update Task
 	updateCacheTaskErr := make(chan error)
@@ -274,9 +277,7 @@ func TestRunUpdateCacheTaskDoesFullUpdate(t *testing.T) {
 
 	// First iteration, cache should not be rebuilt
 	clk.Add(4 * time.Second)
-	ef.mu.RLock()
-	require.Equal(t, initialCache, ef.cache)
-	ef.mu.RUnlock()
+	require.Same(t, initialCache, ef.cache.Load())
 
 	// Second iteration, cache should be rebuilt
 	// First we wait for the fullCacheReloadTicker to
@@ -285,9 +286,7 @@ func TestRunUpdateCacheTaskDoesFullUpdate(t *testing.T) {
 	// And then once a gain wait some more for the
 	// cache reload ticker to tick again.
 	clk.Add(6 * time.Second)
-	ef.mu.RLock()
-	require.NotEqual(t, initialCache, ef.cache)
-	ef.mu.RUnlock()
+	require.NotSame(t, initialCache, ef.cache.Load())
 
 	// Stop the task
 	cancel()
@@ -1428,6 +1427,27 @@ func (d *nodeCallCountingDataStore) FetchRegistrationEntries(ctx context.Context
 }
 
 // AgentsByIDCacheCount
+func entryCacheBuildPhaseMetric(phase string) fakemetrics.MetricItem {
+	return fakemetrics.MetricItem{
+		Type: fakemetrics.MeasureSinceWithLabelsType,
+		Key:  []string{telemetry.Entry, telemetry.EntryCacheBuild},
+		Labels: []telemetry.Label{
+			{Name: telemetry.EntryCacheBuildPhase, Value: phase},
+		},
+	}
+}
+
+// entryCacheBuildSubcacheMetrics are the phase timings emitted by
+// buildRegistrationEntriesCache and buildAttestedNodesCache.
+func entryCacheBuildSubcacheMetrics() []fakemetrics.MetricItem {
+	return []fakemetrics.MetricItem{
+		entryCacheBuildPhaseMetric(server_telemetry.EntryCacheBuildPhaseEntryEvents),
+		entryCacheBuildPhaseMetric(server_telemetry.EntryCacheBuildPhaseEntryLoad),
+		entryCacheBuildPhaseMetric(server_telemetry.EntryCacheBuildPhaseNodeEvents),
+		entryCacheBuildPhaseMetric(server_telemetry.EntryCacheBuildPhaseNodeLoad),
+	}
+}
+
 func agentsByIDMetric(val float64) fakemetrics.MetricItem {
 	return fakemetrics.MetricItem{
 		Type:   fakemetrics.SetGaugeType,

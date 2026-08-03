@@ -1,6 +1,28 @@
 package server
 
-import "github.com/spiffe/spire/pkg/common/telemetry"
+import (
+	"time"
+
+	"github.com/spiffe/spire/pkg/common/telemetry"
+)
+
+// Phases of the event-based entry cache build, reported as the phase label on
+// the entry cache build duration metric.
+const (
+	EntryCacheBuildPhaseEntryEvents = "entry_events"
+	EntryCacheBuildPhaseEntryLoad   = "entry_load"
+	EntryCacheBuildPhaseNodeEvents  = "node_events"
+	EntryCacheBuildPhaseNodeLoad    = "node_load"
+	EntryCacheBuildPhaseTotal       = "total"
+)
+
+// MeasureEntryCacheBuildPhase emits the duration of one phase of an event-based
+// entry cache build.
+func MeasureEntryCacheBuildPhase(m telemetry.Metrics, phase string, start time.Time) {
+	m.MeasureSinceWithLabels([]string{telemetry.Entry, telemetry.EntryCacheBuild}, start, []telemetry.Label{
+		{Name: telemetry.EntryCacheBuildPhase, Value: phase},
+	})
+}
 
 // SetEntryDeletedGauge emits a gauge with the number of entries that will
 // be deleted in the entry cache.

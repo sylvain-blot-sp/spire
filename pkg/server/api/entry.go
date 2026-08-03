@@ -145,12 +145,19 @@ func (e *ReadOnlyEntry) Clone(mask *types.EntryMask) *types.Entry {
 
 // RegistrationEntriesToProto converts RegistrationEntry's into Entry's
 func RegistrationEntriesToProto(es []*common.RegistrationEntry) ([]*types.Entry, error) {
+	return RegistrationEntriesToProtoInterned(es, nil)
+}
+
+// RegistrationEntriesToProtoInterned converts registration entries, sharing
+// the strings that repeat across entries through interner. A nil interner
+// makes it identical to RegistrationEntriesToProto.
+func RegistrationEntriesToProtoInterned(es []*common.RegistrationEntry, interner *StringInterner) ([]*types.Entry, error) {
 	if es == nil {
 		return nil, nil
 	}
 	pbs := make([]*types.Entry, 0, len(es))
 	for _, e := range es {
-		pb, err := RegistrationEntryToProto(e)
+		pb, err := registrationEntryToProto(e, interner)
 		if err != nil {
 			return nil, err
 		}
@@ -161,6 +168,10 @@ func RegistrationEntriesToProto(es []*common.RegistrationEntry) ([]*types.Entry,
 
 // RegistrationEntryToProto converts RegistrationEntry into types Entry
 func RegistrationEntryToProto(e *common.RegistrationEntry) (*types.Entry, error) {
+	return registrationEntryToProto(e, nil)
+}
+
+func registrationEntryToProto(e *common.RegistrationEntry, interner *StringInterner) (*types.Entry, error) {
 	if e == nil {
 		return nil, errors.New("missing registration entry")
 	}
@@ -183,14 +194,14 @@ func RegistrationEntryToProto(e *common.RegistrationEntry) (*types.Entry, error)
 			if err != nil {
 				return nil, fmt.Errorf("invalid federated trust domain: %w", err)
 			}
-			federatesWith = append(federatesWith, td.Name())
+			federatesWith = append(federatesWith, interner.Intern(td.Name()))
 		}
 	}
 
 	entry := &types.Entry{
 		Id:             e.EntryId,
-		SpiffeId:       ProtoFromID(spiffeID),
-		ParentId:       ProtoFromID(parentID),
+		SpiffeId:       protoFromIDInterned(spiffeID, interner),
+		ParentId:       protoFromParentIDInterned(parentID, interner),
 		Selectors:      ProtoFromSelectors(e.Selectors),
 		X509SvidTtl:    e.X509SvidTtl,
 		FederatesWith:  federatesWith,

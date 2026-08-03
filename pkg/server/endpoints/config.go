@@ -91,6 +91,15 @@ type Config struct {
 	// EventsBasedCache enabled event driven cache reloads
 	EventsBasedCache bool
 
+	// EventsBasedCachePageSize is how many rows each cache load page requests.
+	// Zero selects the default.
+	EventsBasedCachePageSize int32
+
+	// EventsBasedCacheStartupGapWindow is how many event IDs below the startup
+	// watermark are checked for transactions that were in flight when the
+	// cache was built. Nil selects the default.
+	EventsBasedCacheStartupGapWindow *uint
+
 	// PruneEventsOlderThan controls how long events can live before they are pruned
 	PruneEventsOlderThan time.Duration
 

@@ -1949,6 +1949,9 @@ type entryScenario struct {
 	metrics  *fakemetrics.FakeMetrics
 	ds       *fakedatastore.DataStore
 	pageSize int32
+	// startupGapWindow is passed through to the cache build. Zero keeps the
+	// pre-existing behavior of seeding from the entire retained event history.
+	startupGapWindow uint
 }
 
 type entryScenarioSetup struct {
@@ -1958,6 +1961,7 @@ type entryScenarioSetup struct {
 	registrationEntryEvents []*datastore.RegistrationEntryEvent
 	err                     error
 	pageSize                int32
+	startupGapWindow        uint
 }
 
 func NewEntryScenario(t *testing.T, setup *entryScenarioSetup) *entryScenario {
@@ -2016,12 +2020,16 @@ func NewEntryScenario(t *testing.T, setup *entryScenarioSetup) *entryScenario {
 		metrics:  metrics,
 		ds:       ds,
 		pageSize: setup.pageSize,
+
+		startupGapWindow: setup.startupGapWindow,
 	}
 }
 
 func (s *entryScenario) buildRegistrationEntriesCache() (*registrationEntries, error) {
-	registrationEntries, err := buildRegistrationEntriesCache(s.ctx, s.log, s.metrics, s.ds, s.clk, s.cache, s.pageSize, defaultCacheReloadInterval, defaultEventTimeout)
+	registrationEntries, err := buildRegistrationEntriesCache(s.ctx, s.log, s.metrics, s.ds, s.clk, s.cache, s.pageSize, defaultCacheReloadInterval, defaultEventTimeout, s.startupGapWindow)
 	if registrationEntries != nil {
+		// Publish the cache, as buildCache does once the sink is finished.
+		registrationEntries.cache = s.cache
 		// clear out the fetches
 		for entry := range registrationEntries.fetchEntries {
 			delete(registrationEntries.fetchEntries, entry)

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -108,17 +109,19 @@ type serverConfig struct {
 }
 
 type experimentalConfig struct {
-	AgentSpiffeIdAsSelector bool                        `hcl:"agent_spiffe_id_as_selector"`
-	AuthOpaPolicyEngine     *authpolicy.OpaEngineConfig `hcl:"auth_opa_policy_engine"`
-	CacheReloadInterval     string                      `hcl:"cache_reload_interval"`
-	FullCacheReloadInterval string                      `hcl:"full_cache_reload_interval"`
-	EventsBasedCache        bool                        `hcl:"events_based_cache"`
-	PruneEventsOlderThan    string                      `hcl:"prune_events_older_than"`
-	EventTimeout            string                      `hcl:"event_timeout"`
-	SQLTransactionTimeout   string                      `hcl:"sql_transaction_timeout"`
-	RequirePQKEM            bool                        `hcl:"require_pq_kem"`
-	WITKeyType              string                      `hcl:"wit_key_type"`
-	WITIssuer               string                      `hcl:"wit_issuer"`
+	AgentSpiffeIdAsSelector          bool                        `hcl:"agent_spiffe_id_as_selector"`
+	AuthOpaPolicyEngine              *authpolicy.OpaEngineConfig `hcl:"auth_opa_policy_engine"`
+	CacheReloadInterval              string                      `hcl:"cache_reload_interval"`
+	FullCacheReloadInterval          string                      `hcl:"full_cache_reload_interval"`
+	EventsBasedCache                 bool                        `hcl:"events_based_cache"`
+	EventsBasedCachePageSize         int                         `hcl:"events_based_cache_page_size"`
+	EventsBasedCacheStartupGapWindow *int                        `hcl:"events_based_cache_startup_gap_window"`
+	PruneEventsOlderThan             string                      `hcl:"prune_events_older_than"`
+	EventTimeout                     string                      `hcl:"event_timeout"`
+	SQLTransactionTimeout            string                      `hcl:"sql_transaction_timeout"`
+	RequirePQKEM                     bool                        `hcl:"require_pq_kem"`
+	WITKeyType                       string                      `hcl:"wit_key_type"`
+	WITIssuer                        string                      `hcl:"wit_issuer"`
 
 	Flags fflag.RawConfig `hcl:"feature_flags"`
 
@@ -784,6 +787,22 @@ func NewServerConfig(c *Config, logOptions []log.Option, allowUnknownConfig bool
 	}
 
 	sc.EventsBasedCache = c.Server.Experimental.EventsBasedCache
+
+	if pageSize := c.Server.Experimental.EventsBasedCachePageSize; pageSize != 0 {
+		if pageSize < 0 || pageSize > math.MaxInt32 {
+			return nil, fmt.Errorf("events based cache page size must be between 1 and %d, got %d", math.MaxInt32, pageSize)
+		}
+		sc.EventsBasedCachePageSize = int32(pageSize)
+	}
+
+	if gapWindow := c.Server.Experimental.EventsBasedCacheStartupGapWindow; gapWindow != nil {
+		if *gapWindow < 0 {
+			return nil, fmt.Errorf("events based cache startup gap window must not be negative, got %d", *gapWindow)
+		}
+		window := uint(*gapWindow)
+		sc.EventsBasedCacheStartupGapWindow = &window
+	}
+
 	sc.AuthOpaPolicyEngineConfig = c.Server.Experimental.AuthOpaPolicyEngine
 
 	for _, f := range c.Server.Experimental.Flags {
