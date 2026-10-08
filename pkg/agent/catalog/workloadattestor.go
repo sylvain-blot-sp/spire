@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor/codesign"
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor/docker"
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor/k8s"
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor/systemd"
@@ -28,6 +29,7 @@ func (repo *workloadAttestorRepository) Versions() []catalog.Version {
 
 func (repo *workloadAttestorRepository) BuiltIns() []catalog.BuiltIn {
 	return []catalog.BuiltIn{
+		codesign.BuiltIn(),
 		docker.BuiltIn(),
 		k8s.BuiltIn(),
 		systemd.BuiltIn(),
